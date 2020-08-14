@@ -19,17 +19,25 @@ from onmt.modules.optimized.feed_forward import PositionWiseFeedForward
 
 class RelativeTransformerEncoderLayer(nn.Module):
     # def __init__(self, h, d_model, p, d_ff, attn_p=0.1, variational=False, death_rate=0.0, **kwargs):
-    def __init__(self, opt, death_rate=0.0, **kwargs):
+    def __init__(self, opt, death_rate=0.0, remove_residual=False, meanpool_residual=False, **kwargs):
         super(RelativeTransformerEncoderLayer, self).__init__()
         self.variational = opt.variational_dropout
         self.death_rate = death_rate
         self.fast_self_attention = opt.fast_self_attention
 
+        if remove_residual:
+            if meanpool_residual:
+                att_postpro_type = 'dm'  # dropout, no normal residual, use meanpool instead
+            else:
+                att_postpro_type = 'd'  # only dropout
+        else:
+            att_postpro_type = 'da'  # dropout, normal residual
+
         self.preprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence='n')
-        self.postprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence='da',
+        self.postprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence=att_postpro_type,
                                                   variational=self.variational)
         self.preprocess_ffn = PrePostProcessing(opt.model_size, opt.dropout, sequence='n')
-        self.postprocess_ffn = PrePostProcessing(opt.model_size, opt.dropout, sequence='da',
+        self.postprocess_ffn = PrePostProcessing(opt.model_size, opt.dropout, sequence=att_postpro_type,
                                                  variational=self.variational)
         d_head = opt.model_size // opt.n_heads
         if not self.fast_self_attention:

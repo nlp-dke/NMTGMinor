@@ -51,6 +51,8 @@ def make_parser(parser):
                         help="""Using streaming in training""")
     parser.add_argument('-stream_context', default='global', type=str,
                         help="""Using streaming in training""")
+    parser.add_argument('-enable_tensorboard', action='store_true',
+                        help="""If true, enable tensorboard""")
 
     # MODEL CONFIG
     parser.add_argument('-model', default='transformer',
@@ -302,6 +304,20 @@ def make_parser(parser):
                         help='Using reversible models for encoder')
     parser.add_argument('-tgt_reversible', action='store_true',
                         help='Using reversible models for decoder')
+
+    # Language similarity
+    parser.add_argument('-remove_residual', type=int, default=None,
+                        help='Whether to remove residual connections in encoder layer output. '
+                             '1 (1st)|-1 (last)|0 (all)|None')
+    parser.add_argument('-meanpool_residual', action='store_true',
+                        help='If true, use meanpool to the normal residual')
+
+    # Adversarial
+    # parser.add_argument('-language_classifier', action='store_true',
+    #                     help='Whether to an language classifier')
+    # parser.add_argument('-reversed_gradient_scale', type=float, default=1.0,
+    #                     help='Scale for reversed gradient under adversarial training')
+
     return parser
 
 
@@ -424,5 +440,20 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'input_feature_size'):
         opt.input_feature_size = 40
+
+    if not hasattr(opt, 'remove_residual'):
+        opt.remove_residual = None
+
+    if not hasattr(opt, 'meanpool_residual'):
+        opt.meanpool_residual = False
+
+    if not hasattr(opt, 'enable_tensorboard'):
+        opt.enable_tensorboard = False
+
+    # if not hasattr(opt, 'language_classifier'):
+    #     opt.language_classifier = True
+    #
+    # if not hasattr(opt, 'gradient_scale'):
+    #     opt.gradient_scale = 1.0
 
     return opt
