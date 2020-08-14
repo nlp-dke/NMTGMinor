@@ -15,6 +15,8 @@ from collections import defaultdict
 import os
 import numpy as np
 
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"  # otherwise the device order pytorch sees is different from listed by nvidia-smi
+
 parser = argparse.ArgumentParser(description='train.py')
 onmt.markdown.add_md_help_argument(parser)
 

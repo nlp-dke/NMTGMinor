@@ -12,6 +12,7 @@ from copy import deepcopy
 from onmt.utils import checkpoint_paths, normalize_gradients
 import glob
 
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"  # otherwise the device order pytorch sees is different from listed by nvidia-smi
 
 parser = argparse.ArgumentParser(description='translate.py')
 onmt.markdown.add_md_help_argument(parser)
