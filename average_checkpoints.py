@@ -8,6 +8,7 @@ import math
 import numpy
 from onmt.model_factory import build_model
 
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 
 parser = argparse.ArgumentParser(description='translate.py')
 onmt.markdown.add_md_help_argument(parser)

@@ -13,6 +13,8 @@ from options import make_parser
 from collections import defaultdict
 import os
 
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+
 parser = argparse.ArgumentParser(description='train.py')
 onmt.markdown.add_md_help_argument(parser)
 

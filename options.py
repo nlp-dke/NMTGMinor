@@ -213,6 +213,8 @@ def make_parser(parser):
                         help="Save every this interval.")
     parser.add_argument('-copy_generator', action='store_true',
                         help='Use the copy_generator')
+    parser.add_argument('-early_stop_if_no_change', type=int, default=10,
+                        help='Stop training if dev loss does not reduce for some epochs.')
 
     # for FUSION
     parser.add_argument('-lm_checkpoint', default='', type=str,
@@ -321,5 +323,8 @@ def backward_compatible(opt):
 
     if opt.model == 'relative_unified_transformer' and not opt.src_align_right:
         print(" !!! Warning: model %s requires source sentences aligned to the right (-src_align_right)" % opt.model)
+
+    if not hasattr(opt, 'early_stop_if_no_change'):
+        opt.early_stop_if_no_change = 10
 
     return opt

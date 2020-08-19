@@ -166,6 +166,11 @@ class XETrainer(BaseTrainer):
             print(" * Deleting old save file %s ...." % save_file)
             os.remove(save_file)
 
+        best_epoch = float(re.search("_e(.*)\.pt", existed_save_files[0]).group(1))
+        if epoch - best_epoch >= opt.early_stop_if_no_change:
+            print(" * Early stopping at epoch %s as best epoch was %s ." % (epoch, best_epoch))
+            sys.exit(0)
+
     def eval(self, data):
         total_loss = 0
         total_words = 0
