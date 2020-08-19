@@ -6,6 +6,7 @@ from onmt.models.transformer_layers import PositionalEncoding
 from onmt.models.relative_transformer import SinusoidalPositionalEmbedding, RelativeTransformer
 from onmt.modules.copy_generator import CopyGenerator
 from options import backward_compatible
+import math
 
 init = torch.nn.init
 
@@ -174,13 +175,19 @@ def init_model_parameters(model, opt):
     init_std = 0.02  # magical number
 
     def init_weight(weight):
-        nn.init.normal_(weight, 0.0, init_std)
+        if len(weight.shape) == 2:
+            std_ = math.sqrt(2.0 / (weight.shape[0] + weight.shape[1]))
+            nn.init.normal_(weight, 0.0, std_)
+        else:
+            nn.init.normal_(weight, 0.0, init_std)
 
     def init_embed(weight):
-        nn.init.uniform_(weight, -0.01, 0.01)
+        # nn.init.uniform_(weight, -0.01, 0.01)
+        nn.init.normal_(weight, 0.0, 0.02)
 
     def init_bias(bias):
-        nn.init.constant_(bias, 0.0)
+        # nn.init.constant_(bias, 0.0)
+        nn.init.normal_(bias, 0.0, init_std)
 
     def weights_init(m):
         classname = m.__class__.__name__
