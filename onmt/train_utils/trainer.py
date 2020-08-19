@@ -8,12 +8,13 @@ from torch.autograd import Variable
 import math
 import time, datetime
 import os
+import re
 from onmt.model_factory import init_model_parameters
 from onmt.utils import checkpoint_paths, normalize_gradients
 from apex import amp
 from onmt.train_utils.stats import Logger
 from onmt.model_factory import build_model, build_language_model, optimize_model
-
+import sys
 
 class BaseTrainer(object):
 
