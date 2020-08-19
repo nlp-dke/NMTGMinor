@@ -94,13 +94,7 @@ class RelativeTransformerEncoder(TransformerEncoder):
             death_r = (_l + 1.0) / self.layers * self.death_rate
 
             if not self.reversible:
-                remove_residual = (self.remove_residual == 0) or \
-                                  (self.remove_residual == _l + 1) or \
-                                  (self.remove_residual == -1 and _l == self.layers - 1)
-                print('*** Layer', _l, 'remove residual', remove_residual)
-
-                block = RelativeTransformerEncoderLayer(self.opt, death_rate=death_r, remove_residual=remove_residual,
-                                                        meanpool_residual=self.meanpool_residual)
+                block = RelativeTransformerEncoderLayer(self.opt, death_rate=death_r)
             else:
                 block = ReversibleTransformerEncoderLayer(self.opt, death_rate=death_r)
 

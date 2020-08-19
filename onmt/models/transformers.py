@@ -149,13 +149,7 @@ class TransformerEncoder(nn.Module):
                     # block = EncoderLayer(self.n_heads, self.model_size,
                     #                      self.dropout, self.inner_size, self.attn_dropout,
                     #                      variational=self.varitional_dropout, death_rate=death_r)
-                    remove_residual = (self.remove_residual == 0) or \
-                                      (self.remove_residual == _l + 1) or \
-                                      (self.remove_residual == -1 and _l == self.layers - 1)
-                    print('*** Layer', _l, 'remove residual', remove_residual)
-
-                    block = EncoderLayer(self.opt, death_rate=death_r,
-                                         remove_residual=remove_residual, meanpool_residual=self.meanpool_residual)
+                    block = EncoderLayer(self.opt, death_rate=death_r)
                 else:
                     block = ReversibleTransformerEncoderLayer(self.opt, death_rate=death_r)
 

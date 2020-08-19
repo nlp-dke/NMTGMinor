@@ -68,16 +68,6 @@ class PrePostProcessing(nn.Module):
                         output = output + input_tensor
                     else:
                         output = F.relu(self.k) * output + input_tensor
-            if step == 'm':  # keep residual but, use mean pool instead
-                if input_tensor is not None:
-                    mask_ = mask.permute(2, 0, 1)  # B x H x T --> T x B x H
-                    meanpool_tensor = torch.sum(input_tensor.float().masked_fill(mask_, 0).type_as(input_tensor), dim=0,
-                                               keepdim=True) / (1 - mask_.float()).sum(dim=0)
-                    # masked_fill_ is inplace. currently not inplace
-                    if onmt.constants.residual_type != 'gated':
-                        output = output + meanpool_tensor
-                    else:
-                        output = F.relu(self.k) * output + meanpool_tensor
         return output
 
 
@@ -105,25 +95,17 @@ class EncoderLayer(nn.Module):
     """
 
     # def __init__(self, h, d_model, p, d_ff, attn_p=0.1, variational=False, death_rate=0.0, **kwargs):
-    def __init__(self, opt, death_rate=0.0, remove_residual=False, meanpool_residual=False, **kwargs):
+    def __init__(self, opt, death_rate=0.0, **kwargs):
         super(EncoderLayer, self).__init__()
         self.variational = opt.variational_dropout
         self.death_rate = death_rate
         self.fast_self_attention = opt.fast_self_attention
 
-        if remove_residual:
-            if meanpool_residual:
-                att_postpro_type = 'dm'  # dropout, no normal residual, use meanpool instead
-            else:
-                att_postpro_type = 'd'  # only dropout
-        else:
-            att_postpro_type = 'da'  # dropout, normal residual
-
         self.preprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence='n')
-        self.postprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence=att_postpro_type,
+        self.postprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence='da',
                                                   variational=self.variational)
         self.preprocess_ffn = PrePostProcessing(opt.model_size, opt.dropout, sequence='n')
-        self.postprocess_ffn = PrePostProcessing(opt.model_size, opt.dropout, sequence=att_postpro_type,
+        self.postprocess_ffn = PrePostProcessing(opt.model_size, opt.dropout, sequence='da',
                                                  variational=self.variational)
 
         if opt.fast_self_attention:
