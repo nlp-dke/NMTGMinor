@@ -7,6 +7,7 @@ import argparse
 import math
 import numpy
 from onmt.model_factory import build_model
+import os
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 

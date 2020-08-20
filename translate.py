@@ -14,6 +14,7 @@ import numpy as np
 import apex
 from onmt.inference.fast_translator import FastTranslator
 from onmt.inference.stream_translator import StreamTranslator
+import os
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 
