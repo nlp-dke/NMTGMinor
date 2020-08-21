@@ -1,3 +1,5 @@
+import copy
+import math
 import numpy as np
 import torch, math
 import torch.nn as nn
@@ -24,7 +26,7 @@ class MixedEncoder(nn.Module):
     def forward(self, input, **kwargs):
         """
         Inputs Shapes:
-            input: batch_size x len_src (wanna tranpose)
+            input: batch_size x len_src (to be transposed)
 
         Outputs Shapes:
             out: batch_size x len_src x d_model
@@ -53,6 +55,7 @@ class TransformerEncoder(nn.Module):
 
         super(TransformerEncoder, self).__init__()
 
+        self.opt = opt
         self.model_size = opt.model_size
         self.n_heads = opt.n_heads
         self.inner_size = opt.inner_size
@@ -104,6 +107,10 @@ class TransformerEncoder(nn.Module):
         else:
             self.word_lut = embedding
 
+        self.change_residual_at = opt.change_residual_at
+        self.change_residual = None if self.change_residual_at is None else opt.change_residual
+        self.change_att_query_at = opt.change_att_query_at
+        self.change_att_query = None if self.change_att_query_at is None else opt.change_att_query
         # if opt.time == 'positional_encoding':
         #     self.time_transformer = positional_encoder
         # elif opt.time == 'gru':
@@ -132,9 +139,28 @@ class TransformerEncoder(nn.Module):
             # linearly decay the death rate
             death_r = (_l + 1.0) / self.layers * self.death_rate
 
+            change_residual = None
+            change_residual_here = (self.change_residual_at == 0) or \
+                                   (self.change_residual_at == _l + 1) or \
+                                   (self.change_residual_at == -1 and _l == self.layers - 1)
+            if change_residual_here:
+                print('*** Layer', _l, 'change residual to code', self.change_residual)
+                change_residual = self.change_residual
+
+            change_att_query = None
+            change_att_query_here = (self.change_att_query_at == 0) or \
+                                    (self.change_att_query_at == _l + 1) or \
+                                    (self.change_att_query_at == -1 and _l == self.layers - 1)
+            if change_att_query_here:
+                print('*** Layer', _l, 'change att query to code', self.change_att_query)
+                change_att_query = self.change_att_query
+
             block = EncoderLayer(self.n_heads, self.model_size,
                                  self.dropout, self.inner_size, self.attn_dropout,
-                                 variational=self.varitional_dropout, death_rate=death_r)
+                                 variational=self.varitional_dropout, death_rate=death_r,
+                                 change_residual=change_residual,
+                                 change_att_query=change_att_query
+                                 )
 
             self.layer_modules.append(block)
 
@@ -146,7 +172,7 @@ class TransformerEncoder(nn.Module):
     def forward(self, input, input_lang=None, **kwargs):
         """
         Inputs Shapes:
-            input: batch_size x len_src (wanna tranpose)
+            input: batch_size x len_src (to be transposed)
 
         Outputs Shapes:
             out: batch_size x len_src x d_model
@@ -156,7 +182,7 @@ class TransformerEncoder(nn.Module):
 
         """ Embedding: batch_size x len_src x d_model """
         if self.input_type == "text":
-            mask_src = input.eq(onmt.constants.PAD).unsqueeze(1)  # batch_size x len_src x 1 for broadcasting
+            mask_src = input.eq(onmt.constants.PAD).unsqueeze(1)  # batch_size x 1 x len_src for broadcasting
 
             # apply switchout
             # if self.switchout > 0 and self.training:
@@ -197,6 +223,10 @@ class TransformerEncoder(nn.Module):
 
         """ Adding positional encoding """
         emb = self.time_transformer(emb)
+        if self.change_att_query is None:
+            given_query = None
+        else:
+            given_query = self.time_transformer(emb, change_code=self.change_att_query).transpose(0, 1)
 
         """ Adding language embeddings """
         if self.use_language_embedding:
@@ -212,7 +242,7 @@ class TransformerEncoder(nn.Module):
         context = self.preprocess_layer(context)
 
         for i, layer in enumerate(self.layer_modules):
-                context = layer(context, mask_src)  # batch_size x len_src x d_model
+            context = layer(context, mask_src, given_query=given_query)  # batch_size x len_src x d_model
 
         # From Google T2T
         # if normalization is done in layer_preprocess, then it should also be done
@@ -348,7 +378,7 @@ class TransformerDecoder(nn.Module):
     def forward(self, input, context, src, input_lang=None, **kwargs):
         """
         Inputs Shapes:
-            input: (Variable) batch_size x len_tgt (wanna tranpose)
+            input: (Variable) batch_size x len_tgt (to be transposed)
             context: (Variable) batch_size x len_src x d_model
             mask_src (Tensor) batch_size x len_src
         Outputs Shapes:
@@ -402,7 +432,7 @@ class TransformerDecoder(nn.Module):
     def step(self, input, decoder_state, **kwargs):
         """
         Inputs Shapes:
-            input: (Variable) batch_size x len_tgt (wanna tranpose)
+            input: (Variable) batch_size x len_tgt (to be transposed)
             context: (Variable) batch_size x len_src x d_model
             mask_src (Tensor) batch_size x len_src
             buffer (List of tensors) List of batch_size * len_tgt-1 * d_model for self-attention recomputing

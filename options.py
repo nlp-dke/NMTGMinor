@@ -237,6 +237,19 @@ def make_parser(parser):
     parser.add_argument('-zero_encoder', action='store_true',
                         help='Zero-out encoders during training')
 
+    # Language similarity
+    parser.add_argument('-change_residual_at', type=int, default=None,
+                        help='Where to remove residual connections in encoder layer output. '
+                             '1 (1st)|-1 (last)|0 (all)|None')
+    parser.add_argument('-change_residual', type=int, default=None,
+                        help='1: replace residual by meanpool, 2: remove residual')
+
+    parser.add_argument('-change_att_query_at', type=int, default=None,
+                        help='Where to change attention query in encoder layer output. '
+                             '1 (1st)|-1 (last)|0 (all)|None')
+    parser.add_argument('-change_att_query', type=int, default=None,
+                        help='1: remove word emb, 2: remove word emb, reverse PE, 3: fully random?')
+
     return parser
 
 
@@ -326,5 +339,17 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'early_stop_if_no_change'):
         opt.early_stop_if_no_change = 10
+
+    if not hasattr(opt, 'change_residual_at'):
+        opt.change_residual_at = None
+
+    if not hasattr(opt, 'change_residual'):
+        opt.change_residual = False
+
+    if not hasattr(opt, 'change_att_query_at'):
+        opt.change_att_query_at = None
+
+    if not hasattr(opt, 'change_att_query'):
+        opt.change_att_query = None
 
     return opt
