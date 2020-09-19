@@ -250,6 +250,44 @@ def make_parser(parser):
     parser.add_argument('-change_att_query', type=int, default=None,
                         help='1: remove word emb, 2: remove word emb, reverse PE, 3: fully random?')
 
+    parser.add_argument('-multiway_src', action='store_true',
+                        help="""Use multiway source sentences""")
+    parser.add_argument('-multiway_src_valid', action='store_true',
+                        help="""Use multiway source sentences in dev set""")
+
+    parser.add_argument('-sim_loss_type', type=int, default=None,
+                        help='Type of aux. loss to encourage language similarity. 1st digit: 1(by position)|2(mean)|3(max),'
+                             '2nd digit: 1(squared error)|...(abs error)')
+    parser.add_argument('-aux_loss_weight', type=float, default=0.0,
+                        help='Weight for the auxiliary loss')
+
+    parser.add_argument('-freeze_encoder', action='store_true',
+                        help='Whether to freeze encoder')
+    parser.add_argument('-freeze_decoder', action='store_true',
+                        help='Whether to freeze decoder')
+    parser.add_argument('-freeze_language_classifier', action='store_true',
+                        help='Whether to freeze language classifier')
+
+    parser.add_argument('-language_classifier', action='store_true',
+                        help='Whether to use a language classifier')
+    parser.add_argument('-language_classifier_sent', action='store_true',
+                        help='Whether to use a language classifier (sent level)')
+    parser.add_argument('-gradient_scale', type=float, default=1.0,
+                        help='Scale for flipped gradient')
+
+    parser.add_argument('-att_plot_path', type=str, default=None,
+                        help='If not None, save encoder att distribution from the layer where change is applied.')
+    parser.add_argument('-save_activation', type=str, default=None,
+                        help='If not None, save encoder att distribution from the layer where change is applied.')
+    parser.add_argument('-save_classifier_activation', type=str, default=None,
+                        help='If not None, save encoder att distribution from the layer where change is applied..')
+
+    parser.add_argument('-load_vocab_from_data', type=str, default=None,
+                        help="""When resuming from checkpoints, load vocab from training data instead of from previouis checkpoints.""")
+
+    parser.add_argument('-reverse_loss_landscape', action='store_true',
+                        help="Whether to reverse loss landscpe.")
+
     return parser
 
 
@@ -351,5 +389,44 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'change_att_query'):
         opt.change_att_query = None
+
+    if not hasattr(opt, 'multiway_src'):
+        opt.multiway_src = False
+
+    if not hasattr(opt, 'multiway_src_valid'):
+        opt.multiway_src_valid = False
+
+    if not hasattr(opt, 'language_classifier'):
+        opt.language_classifier = False
+
+    if not hasattr(opt, 'language_classifier_sent'):
+        opt.language_classifier_sent = False
+
+    if not hasattr(opt, 'gradient_scale'):
+        opt.gradient_scale = 1.0
+
+    if not hasattr(opt, 'freeze_encoder'):
+        opt.freeze_encoder = False
+
+    if not hasattr(opt, 'freeze_decoder'):
+        opt.freeze_decoder = False
+
+    if not hasattr(opt, 'freeze_language_classifier'):
+        opt.freeze_language_classifier = False
+
+    if not hasattr(opt, 'att_plot_path'):
+        opt.att_plot_path = None
+
+    if not hasattr(opt, 'save_activation'):
+        opt.save_activation = None
+
+    if not hasattr(opt, 'load_vocab_from_data'):
+        opt.load_vocab_from_data = None
+
+    if not hasattr(opt, 'reverse_loss_landscape'):
+        opt.reverse_loss_landscape = False
+
+    if not hasattr(opt, 'save_classifier_activation'):
+        opt.save_classifier_activation = False
 
     return opt

@@ -168,6 +168,7 @@ class XETrainer(BaseTrainer):
             os.remove(save_file)
 
         best_epoch = float(re.search("_e(.*)\.pt", existed_save_files[0]).group(1))
+
         if epoch - best_epoch >= opt.early_stop_if_no_change:
             print(" * Early stopping at epoch %s as best epoch was %s ." % (epoch, best_epoch))
             sys.exit(0)
@@ -175,9 +176,12 @@ class XETrainer(BaseTrainer):
     def eval(self, data):
         total_loss = 0
         total_words = 0
+        total_adv_loss = 0.0
+        total_src_words = 0.0
+        total_predict, correct_predict = 0.0, 0.0
         opt = self.opt
 
-        batch_order = data.create_order(random=False)
+        # batch_order = data.create_order(random=False)
         self.model.eval()
         self.model.reset_states()
 
@@ -215,15 +219,54 @@ class XETrainer(BaseTrainer):
 
                 outputs['tgt_mask'] = tgt_mask
 
+                # normal loss
                 loss_dict = self.loss_function(outputs, targets, model=self.model)
-
                 loss_data = loss_dict['data']
 
                 total_loss += loss_data
                 total_words += batch.tgt_size
 
+                total_src_words += batch.src_size
+                # adv loss
+                if False:
+                    targets_src_lang = batch.get('targets_source_lang')
+                    classifier_loss_dict = self.loss_function(outputs, targets=targets_src_lang, model=self.model,
+                                                              lan_classifier=True,
+                                                              reverse_landscape=opt.reverse_loss_landscape)
+                    classifier_loss_data = classifier_loss_dict['data'] if classifier_loss_dict['data'] is not None else 0
+
+                    total_adv_loss += classifier_loss_data
+
+
+                # TODO: get prediction accuracy here!
+                # logprobs_lan = outputs['logprobs_lan']
+                # pad
+                # logprobs_lan = logprobs_lan.masked_fill(outputs['src_mask'].permute(2, 0, 1), 0).type_as(logprobs_lan)
+                # pred = torch.exp(logprobs_lan)
+
+                # res = torch.tensor([0.0, 0.0, 0.0])
+
+                # for sent_idx in range(pred.shape[1]):  # T, B, V, for each sentence
+                #     for pos_idx in range(pred.shape[0]):  # for each token
+                #         if not torch.all(pred[pos_idx, sent_idx, :] == 1.0):  # if not at padded positions.
+                #
+                #             if torch.abs(1.0 - torch.sum(pred[pos_idx, sent_idx, :])) < 0.001:
+                #                 pred_idx = torch.argmax(pred[pos_idx, sent_idx, :], dim=0)
+                #
+                #                 total_predict += 1.0
+                #                 if pred_idx == targets_src_lang[pos_idx, sent_idx]:
+                #                     correct_predict += 1
+                #                 # print('predicted', pred_idx, 'target', targets_src_lang[pos_idx, sent_idx])
+                #                 res[pred_idx] += 1.0
+                #             else:
+                #                 print(pred[pos_idx, sent_idx, :])
+
+                # print(res / torch.sum(res))
+
+        # print('Accuracy', correct_predict / total_predict)
+                # print('total_adv_loss', total_adv_loss, 'total_src_words', total_src_words)
         self.model.train()
-        return total_loss / total_words
+        return total_loss / total_words, total_adv_loss / total_src_words
 
     def train_epoch(self, epoch, resume=False, batch_order=None, iteration=0):
 
@@ -247,6 +290,7 @@ class XETrainer(BaseTrainer):
         total_tokens, total_loss, total_words = 0, 0, 0
         total_non_pads = 0
         report_loss, report_tgt_words = 0, 0
+        report_classifier_loss = 0.000001
         report_src_words = 0
         start = time.time()
         n_samples = len(train_data)
@@ -297,25 +341,48 @@ class XETrainer(BaseTrainer):
                     # can be flexibly controlled within models for easier extensibility
                     targets = batch.get('target_output')
                     tgt_mask = targets.data.ne(onmt.constants.PAD)
+
                     outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
                                          zero_encoder=opt.zero_encoder,
                                          mirror=opt.mirror_loss, streaming_state=streaming_state)
 
                     batch_size = batch.size
-
+                    #
                     outputs['tgt_mask'] = tgt_mask
-
+                    #
                     loss_dict = self.loss_function(outputs, targets, model=self.model)
                     loss_data = loss_dict['data']
                     loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
 
                     optimizer = self.optim.optimizer
 
-                    if self.cuda:
-                        with amp.scale_loss(loss, optimizer) as scaled_loss:
-                            scaled_loss.backward()
-                    else:
-                        loss.backward()
+                    has_classifier_loss = self.opt.language_classifier and (not self.opt.freeze_language_classifier)
+
+                    # don't even do backprop if both encoder and decoder are frozen
+                    if not (self.opt.freeze_encoder and self.opt.freeze_decoder):
+                        if self.cuda:
+                            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                                scaled_loss.backward(retain_graph=has_classifier_loss)
+                        else:
+                            loss.backward(retain_graph=has_classifier_loss)
+
+                    # alternate to language clasifier loss
+                    if self.opt.language_classifier:
+                        # src_lang = batch.get('source_lang')
+                        targets_src_lang = batch.get('targets_source_lang')
+                        classifier_loss_dict = self.loss_function(outputs, targets=targets_src_lang, model=self.model,
+                                                       lan_classifier=True, reverse_landscape=self.opt.reverse_loss_landscape)
+                        classifier_loss = classifier_loss_dict['loss'].div(
+                            denom)  # a little trick to avoid gradient overflow with fp16  # should be -
+                        classifier_loss_data = classifier_loss_dict['data'] if classifier_loss_dict['data'] is not None else 0
+                        # loss_data += classifier_loss_data
+
+                        if not self.opt.freeze_language_classifier:
+                            if self.cuda:
+                                with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
+                                    scaled_loss.backward()
+                            else:
+                                classifier_loss.backward()
 
                 except RuntimeError as e:
                     if 'out of memory' in str(e):
@@ -328,7 +395,7 @@ class XETrainer(BaseTrainer):
                     else:
                         raise e
 
-                if loss != loss:
+                if loss != loss or (has_classifier_loss and classifier_loss != classifier_loss):
                     # catching NAN problem
                     oom = True
                     self.model.zero_grad()
@@ -368,8 +435,9 @@ class XETrainer(BaseTrainer):
                         num_accumulated_words = 0
                         num_accumulated_sents = 0
                         num_updates = self.optim._step
+
                         if opt.save_every > 0 and num_updates % opt.save_every == -1 % opt.save_every:
-                            valid_loss = self.eval(self.valid_data)
+                            valid_loss, _ = self.eval(self.valid_data)
                             valid_ppl = math.exp(min(valid_loss, 100))
                             print('Validation perplexity: %g' % valid_ppl)
 
@@ -379,6 +447,7 @@ class XETrainer(BaseTrainer):
 
                     num_words = tgt_size
                     report_loss += loss_data
+                    report_classifier_loss += classifier_loss_data if self.opt.language_classifier else 0
                     report_tgt_words += num_words
                     report_src_words += src_size
                     total_loss += loss_data
@@ -389,10 +458,11 @@ class XETrainer(BaseTrainer):
                     batch_efficiency = total_non_pads / total_tokens
 
                     if b == 0 and (i == 0 or (i % opt.log_interval == -1 % opt.log_interval)):
-                        print(("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; lr: %.7f ; num updates: %7d " +
+                        print(("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; adv loss: %6.6f ; lr: %.7f ; num updates: %7d " +
                                "%5.0f src tok/s; %5.0f tgt tok/s; %s elapsed") %
                               (epoch, i + 1, len(train_data),
                                math.exp(report_loss / report_tgt_words),
+                               math.exp(math.log(max(0.000001, report_classifier_loss)) - math.log(report_src_words)),
                                optim.getLearningRate(),
                                optim._step,
                                report_src_words / (time.time() - start),
@@ -400,6 +470,7 @@ class XETrainer(BaseTrainer):
                                str(datetime.timedelta(seconds=int(time.time() - self.start_time)))))
 
                         report_loss, report_tgt_words = 0, 0
+                        report_classifier_loss = 0.000001
                         report_src_words = 0
                         start = time.time()
 
@@ -465,9 +536,9 @@ class XETrainer(BaseTrainer):
         if opt.load_encoder_from:
             self.load_encoder_weight(opt.load_encoder_from)
 
-        valid_loss = self.eval(self.valid_data)
+        valid_loss, valid_adv_loss = self.eval(self.valid_data)
         valid_ppl = math.exp(min(valid_loss, 100))
-        print('Validation perplexity: %g' % valid_ppl)
+        print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
 
         self.start_time = time.time()
 
@@ -482,9 +553,9 @@ class XETrainer(BaseTrainer):
             print('Train perplexity: %g' % train_ppl)
 
             #  (2) evaluate on the validation set
-            valid_loss = self.eval(self.valid_data)
+            valid_loss, valid_adv_loss = self.eval(self.valid_data)
             valid_ppl = math.exp(min(valid_loss, 100))
-            print('Validation perplexity: %g' % valid_ppl)
+            print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
 
             self.save(epoch, valid_ppl)
             batch_order = None

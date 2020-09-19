@@ -78,6 +78,11 @@ parser.add_argument('-tgt_seq_length', type=int, default=66,
 parser.add_argument('-tgt_seq_length_trunc', type=int, default=0,
                     help="Truncate target sequence length.")
 
+parser.add_argument('-extend_vocab', action='store_true',
+                    help="Extend existing vocabulary")
+parser.add_argument('-extend_language_embedding', action='store_true',
+                    help="Extend existing language dictionary and embedding")
+
 parser.add_argument('-shuffle', type=int, default=1,
                     help="Shuffle data")
 
@@ -148,6 +153,27 @@ def init_vocab(name, data_files, vocab_file, vocab_size, tokenizer, join=False):
 
         vocab.loadFile(vocab_file)
         print('Loaded ' + str(vocab.size()) + ' ' + name + ' words')
+
+        if opt.extend_vocab:
+            total_unk = 0
+            unk_list = set()
+
+            for filename in data_files:
+                print("Reading ADDITIONAL file %s ... " % filename)
+
+                with open(filename) as f:
+                    for sent in f.readlines():
+                        tokens = tokenizer.tokenize(sent)
+                        for token in tokens:
+                            add_id = vocab.add(token)
+                            if add_id == onmt.constants.UNK_WORD:
+                                total_unk += 1
+                                unk_list.add(token)
+
+            original_size = vocab.size()
+            vocab = vocab.prune(vocab_size)
+            print('Created EXTENDED dictionary of size %d (pruned from %d)' % (vocab.size(), original_size))
+            print('total unk freq', total_unk, ', unique', len(unk_list))
 
     if vocab is None:
         print('Building ' + name + ' vocabulary...')
@@ -500,10 +526,17 @@ def main():
     # construct set of languages from the training languages
     src_langs = opt.train_src_lang.split("|")
     tgt_langs = opt.train_tgt_lang.split("|")
-    langs = (src_langs + tgt_langs)
-    langs = list(set(langs))
+    # langs = (src_langs + tgt_langs)
+    # langs = list(set(langs))
 
     dicts['langs'] = dict()
+
+    _src_lang = sorted(list(set(src_langs)))  # We want a lang dict that: sorts language by 1) src, tgt 2) alphabetically
+    _tgt_lang = set()
+    for i in tgt_langs:  # for each tgt language
+        if i not in _src_lang:
+            _tgt_lang.add(i)
+    langs = _src_lang + sorted(list(_tgt_lang))
 
     for lang in langs:
         idx = len(dicts['langs'])
@@ -513,6 +546,8 @@ def main():
 
     src_train_files = opt.train_src.split("|")
     tgt_train_files = opt.train_tgt.split("|")
+    print('***', src_train_files, src_langs)
+    print('***', tgt_train_files, tgt_langs)
 
     # for ASR and LM we only need to build vocab for the 'target' language
     if opt.asr or opt.lm:
@@ -648,6 +683,9 @@ def main():
 
         src_langs = opt.train_src_lang.split("|")
         tgt_langs = opt.train_tgt_lang.split("|")
+
+        print('***', src_input_files, src_langs)
+        print('***', tgt_input_files, tgt_langs)
 
         assert len(src_input_files) == len(src_langs)
         assert len(src_input_files) == len(tgt_input_files)

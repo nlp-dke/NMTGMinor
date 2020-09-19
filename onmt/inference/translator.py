@@ -26,6 +26,21 @@ class Translator(object):
         self.src_lang = opt.src_lang
         self.tgt_lang = opt.tgt_lang
 
+        if hasattr(opt, 'att_plot_path'):
+            self.att_plot_path = opt.att_plot_path
+        else:
+            self.att_plot_path = None
+
+        if hasattr(opt, 'save_activation'):
+            self.save_activation = opt.save_activation
+        else:
+            self.save_activation = None
+
+        if hasattr(opt, 'save_classifier_activation'):
+            self.save_classifier_activation = opt.save_classifier_activation
+        else:
+            self.save_classifier_activation = None
+
         if self.attributes:
             self.attributes = self.attributes.split("|")
 
@@ -62,6 +77,7 @@ class Translator(object):
                     self.lang_dict = { 'src': 0, 'tgt': 1}
 
                 self.bos_id = self.tgt_dict.labelToIdx[self.bos_token]
+                print("=====================BOS", self.bos_id)
 
             # Build model from the saved option
             # if hasattr(model_opt, 'fusion') and model_opt.fusion == True:
@@ -91,6 +107,10 @@ class Translator(object):
 
             self.models.append(model)
             self.model_types.append(model_opt.model)
+
+            model.encoder.save_activation = self.save_activation
+            model.encoder.att_plot_path = self.att_plot_path
+            model.save_classifier_activation = self.save_classifier_activation
 
         # language model
         if opt.lm is not None:
@@ -247,7 +267,8 @@ class Translator(object):
                                                    onmt.constants.UNK_WORD,
                                                    tgt_bos_word,
                                                    onmt.constants.EOS_WORD) for b in tgt_sents]
-
+        print('*** BOS', tgt_bos_word)
+        print('lang dict', self.lang_dict, self.lang_dict[self.src_lang], self.lang_dict[self.tgt_lang])
         src_lang_data = [torch.Tensor([self.lang_dict[self.src_lang]])]
         tgt_lang_data = [torch.Tensor([self.lang_dict[self.tgt_lang]])]
 

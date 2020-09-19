@@ -42,6 +42,107 @@ class MixedEncoder(nn.Module):
             return self.audio_encoder.forward(input)
 
 
+class MultiSourceEncoder(nn.Module):
+    def __init__(self, opt, embedding, encoder_main, encoder_aux, encoder_type='text', language_embeddings=None):
+        super(MultiSourceEncoder, self).__init__()
+
+        self.encoder_main = encoder_main
+        self.encoder_aux = encoder_aux
+
+        self.model_size = opt.model_size
+        self.n_heads = opt.n_heads
+        self.inner_size = opt.inner_size
+        if hasattr(opt, 'encoder_layers') and opt.encoder_layers != -1:
+            self.layers = opt.encoder_layers
+        else:
+            self.layers = opt.layers
+        self.dropout = opt.dropout
+        self.word_dropout = opt.word_dropout
+        self.attn_dropout = opt.attn_dropout
+        self.emb_dropout = opt.emb_dropout
+
+        self.input_type = encoder_type
+        self.cnn_downsampling = opt.cnn_downsampling
+        self.death_rate = opt.death_rate
+
+        self.switchout = opt.switchout
+        self.varitional_dropout = opt.variational_dropout
+        self.use_language_embedding = opt.use_language_embedding
+        self.language_embedding_type = opt.language_embedding_type
+
+        self.time = opt.time
+
+        # disable word dropout when switch out is in action
+        if self.switchout > 0.0:
+            self.word_dropout = 0.0
+
+        feature_size = opt.input_size
+        self.channels = 1  # n. audio channels
+
+        if opt.upsampling:
+            feature_size = feature_size // 4
+
+        # if encoder_type != "text":
+        #     if not self.cnn_downsampling:
+        #         self.audio_trans = nn.Linear(feature_size, self.model_size)
+        #         torch.nn.init.xavier_uniform_(self.audio_trans.weight)
+        #     else:
+        #         channels = self.channels
+        #         cnn = [nn.Conv2d(channels, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True), nn.BatchNorm2d(32),
+        #                nn.Conv2d(32, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True), nn.BatchNorm2d(32)]
+        #
+        #         feat_size = (((feature_size // channels) - 3) // 4) * 32
+        #         # cnn.append()
+        #         self.audio_trans = nn.Sequential(*cnn)
+        #         self.linear_trans = nn.Linear(feat_size, self.model_size)
+                # assert self.model_size == feat_size, \
+                #     "The model dimension doesn't match with the feature dim, expecting %d " % feat_size
+        # else:
+        self.word_lut = embedding
+
+        # if opt.time == 'positional_encoding':
+        #     self.time_transformer = positional_encoder
+        # elif opt.time == 'gru':
+        #     self.time_transformer = nn.GRU(self.model_size, self.model_size, 1, batch_first=True)
+        # elif opt.time == 'lstm':
+        #     self.time_transformer = nn.LSTM(self.model_size, self.model_size, 1, batch_first=True)
+        # self.time_transformer = positional_encoder
+        # self.language_embedding = language_embeddings
+        #
+        # self.preprocess_layer = PrePostProcessing(self.model_size, self.emb_dropout, sequence='d',
+        #                                           variational=self.varitional_dropout)
+        #
+        # self.postprocess_layer = PrePostProcessing(self.model_size, 0, sequence='n')
+
+        # self.positional_encoder = positional_encoder
+        self.do_mixing = opt.mix_encoder_outputs
+        self.enc_out_type = opt.enc_out_type
+        self.language_classifier = opt.language_classifier
+
+    def forward(self, input, input_lang=None, **kwargs):
+        if isinstance(input, list):  #self.training:  # training time, randomly choose
+            # print('*** Random selection.')
+            lan_main, lan_aux = None, None
+#            if len(input_lang.shape)==3:
+            lan_main = input_lang[0]
+            lan_aux = input_lang[1]
+            enc_out_main = self.encoder_main.forward(input[0], input_lang=lan_main)  # take main-language input
+            enc_out_aux = self.encoder_aux.forward(input[1], input_lang=lan_aux)  # take aux-language input
+            # context is T x B x H, e.g. 10, 128, 512
+            context_main = enc_out_main['context']
+            context_aux = enc_out_aux['context']
+            src_mask_main = enc_out_main['src_mask']
+            src_mask_aux = enc_out_aux['src_mask']
+
+            output_dict = {'context': context_main, 'src_mask': src_mask_main, 'context_main': context_main, 'context_aux': context_aux, 'src_mask_main': src_mask_main, 'src_mask_aux': src_mask_aux}
+            return output_dict
+        else:  #when we don't have multiway src. # valid/test time, only take main encoder (We don't necessarily have multiway dev data!)
+            if input_lang is not None:
+                return self.encoder_main.forward(input, input_lang=input_lang)
+            else:
+                return self.encoder_main.forward(input)
+
+
 class TransformerEncoder(nn.Module):
     """Encoder in 'Attention is all you need'
 
@@ -111,6 +212,8 @@ class TransformerEncoder(nn.Module):
         self.change_residual = None if self.change_residual_at is None else opt.change_residual
         self.change_att_query_at = opt.change_att_query_at
         self.change_att_query = None if self.change_att_query_at is None else opt.change_att_query
+        self.att_plot_path = None #'/home/dliu/src/SLT.KIT.private/systems/lrt/iwslt17.fewshot/att_no_pos/att_plot_de_fail.pt'
+        self.save_activation = None #'/home/dliu/src/SLT.KIT.private/systems/lrt/iwslt17/activations_adv/activation_nl.pt'
         # if opt.time == 'positional_encoding':
         #     self.time_transformer = positional_encoder
         # elif opt.time == 'gru':
@@ -128,9 +231,17 @@ class TransformerEncoder(nn.Module):
         self.positional_encoder = positional_encoder
 
         self.layer_modules = nn.ModuleList()
-        self.build_modules()
+        self.build_modules(opt)
 
-    def build_modules(self):
+        if opt.freeze_encoder:
+            for p in self.parameters():
+                p.requires_grad = False
+
+        self.language_classifier = opt.language_classifier
+        self.language_classifier_sent = opt.language_classifier_sent
+
+
+    def build_modules(self, opt):
 
         e_length = expected_length(self.layers, self.death_rate)
         print("* Transformer Encoder with Absolute Attention with %.2f expected layers" % e_length)
@@ -159,7 +270,8 @@ class TransformerEncoder(nn.Module):
                                  self.dropout, self.inner_size, self.attn_dropout,
                                  variational=self.varitional_dropout, death_rate=death_r,
                                  change_residual=change_residual,
-                                 change_att_query=change_att_query
+                                 change_att_query=change_att_query,
+                                 opt=opt
                                  )
 
             self.layer_modules.append(block)
@@ -240,10 +352,20 @@ class TransformerEncoder(nn.Module):
         context = emb.transpose(0, 1)
 
         context = self.preprocess_layer(context)
-
+        # here: embedding
         for i, layer in enumerate(self.layer_modules):
-            context = layer(context, mask_src, given_query=given_query)  # batch_size x len_src x d_model
+            context = layer(context, mask_src, given_query=given_query, att_plot_path=self.att_plot_path)   # batch_size x len_src x d_model
 
+            if self.save_activation is not None:
+                padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
+                try:
+                    saved_att = torch.load(self.save_activation)
+                except OSError:
+                    saved_att = defaultdict(list)
+
+                saved_att[i].append(padded_context)
+                torch.save(saved_att, self.save_activation)
+            # output of layer
         # From Google T2T
         # if normalization is done in layer_preprocess, then it should also be done
         # on the output, since the output can grow very large, being the sum of
@@ -317,6 +439,11 @@ class TransformerDecoder(nn.Module):
         self.layer_modules = nn.ModuleList()
         self.build_modules()
 
+        if opt.freeze_decoder:
+            for p in self.parameters():
+                p.requires_grad = False
+                # print('Require grad in Transformer Decoder:', p.requires_grad)
+
     def build_modules(self):
 
         e_length = expected_length(self.layers, self.death_rate)
@@ -362,7 +489,9 @@ class TransformerDecoder(nn.Module):
         if self.use_language_embedding:
             lang_emb = self.language_embeddings(input_lang)  # B x H or 1 x H
             if self.language_embedding_type == 'sum':
-                emb = emb + lang_emb
+                # print(emb.shape, lang_emb.shape, lang_emb.unsqueeze(1).shape)
+                emb = emb + lang_emb.unsqueeze(1)  # TODO: there was a bug that dim didn't match. Additive doesn't work for zero-shot
+                lang_emb.unsqueeze(1).repeat(1, input.size(1))
             elif self.language_embedding_type == 'concat':
                 # replace the bos embedding with the language
                 bos_emb = lang_emb.expand_as(emb[:, 0, :])
@@ -470,21 +599,20 @@ class TransformerDecoder(nn.Module):
         # emb should be batch_size x 1 x dim
 
         if self.use_language_embedding:
-            if self.use_language_embedding:
-                lang_emb = self.language_embeddings(lang)  # B x H or 1 x H
-                if self.language_embedding_type == 'sum':
-                    emb = emb + lang_emb
-                elif self.language_embedding_type == 'concat':
-                    # replace the bos embedding with the language
-                    if input.size(1) == 1:
-                        bos_emb = lang_emb.expand_as(emb[:, 0, :])
-                        emb[:, 0, :] = bos_emb
+            lang_emb = self.language_embeddings(lang)  # B x H or 1 x H
+            if self.language_embedding_type == 'sum':
+                emb = emb + lang_emb
+            elif self.language_embedding_type == 'concat':
+                # replace the bos embedding with the language
+                if input.size(1) == 1:
+                    bos_emb = lang_emb.expand_as(emb[:, 0, :])
+                    emb[:, 0, :] = bos_emb
 
-                    lang_emb = lang_emb.unsqueeze(1).expand_as(emb)
-                    concat_emb = torch.cat([emb, lang_emb], dim=-1)
-                    emb = torch.relu(self.projector(concat_emb))
-                else:
-                    raise NotImplementedError
+                lang_emb = lang_emb.unsqueeze(1).expand_as(emb)
+                concat_emb = torch.cat([emb, lang_emb], dim=-1)
+                emb = torch.relu(self.projector(concat_emb))
+            else:
+                raise NotImplementedError
 
         emb = emb.transpose(0, 1)
 
@@ -558,6 +686,8 @@ class Transformer(NMTModel):
             self.mirror_decoder = copy.deepcopy(self.decoder)
             self.mirror_g = nn.Linear(decoder.model_size, decoder.model_size)
 
+        self.save_classifier_activation = None
+
     def reset_states(self):
         return
 
@@ -619,6 +749,290 @@ class Transformer(NMTModel):
         # final layer: computing softmax
         logprobs = self.generator[0](output_dict)
         output_dict['logprobs'] = logprobs
+
+        if self.encoder.language_classifier:  # make language classification
+            logprobs_lan = self.generator[1](encoder_output, hidden_name='context')
+            output_dict['logprobs_lan'] = logprobs_lan
+
+        # Mirror network: reverse the target sequence and perform backward language model
+        if mirror:
+            tgt_reverse = torch.flip(batch.get('target_input'), (0, ))
+            tgt_pos = torch.flip(batch.get('target_pos'), (0, ))
+            tgt_reverse = tgt_reverse.transpose(0, 1)
+            # perform an additional backward pass
+            reverse_decoder_output = self.mirror_decoder(tgt_reverse, context, src, input_lang=tgt_lang, input_pos=tgt_pos)
+
+            reverse_decoder_output['src'] = src
+            reverse_decoder_output['context'] = context
+            reverse_decoder_output['target_mask'] = target_mask
+            reverse_logprobs = self.generator[0](reverse_decoder_output)
+
+            output_dict['reverse_hidden'] = reverse_decoder_output['hidden']
+            output_dict['reverse_logprobs'] = reverse_logprobs
+
+            # learn weights for mapping (g in the paper)
+            output_dict['hidden'] = self.mirror_g(output_dict['hidden'])
+
+        # # This step removes the padding to reduce the load for the final layer
+        # if target_masking is not None:
+        #     output = output.contiguous().view(-1, output.size(-1))
+        #
+        #     mask = target_masking
+        #     """ We remove all positions with PAD """
+        #     flattened_mask = mask.view(-1)
+        #
+        #     non_pad_indices = torch.nonzero(flattened_mask).squeeze(1)
+        #
+        #     output = output.index_select(0, non_pad_indices)
+
+        return output_dict
+
+    def decode(self, batch):
+        """
+        :param batch: (onmt.Dataset.Batch) an object containing tensors needed for training
+        :return: gold_scores (torch.Tensor) log probs for each sentence
+                 gold_words  (Int) the total number of non-padded tokens
+                 allgold_scores (list of Tensors) log probs for each word in the sentence
+        """
+        src = batch.get('source')
+        src_pos = batch.get('source_pos')
+        tgt_input = batch.get('target_input')
+        tgt_output = batch.get('target_output')
+        tgt_pos = batch.get('target_pos')
+        # tgt_atb = batch.get('target_atb')  # a dictionary of attributes
+        src_lang = batch.get('source_lang')
+        tgt_lang = batch.get('target_lang')
+
+        # transpose to have batch first
+        src = src.transpose(0, 1)
+        tgt_input = tgt_input.transpose(0, 1)
+        batch_size = tgt_input.size(0)
+
+        context = self.encoder(src, input_pos=src_pos, input_lang=src_lang)['context']
+
+        if hasattr(self, 'autoencoder') and self.autoencoder \
+                and self.autoencoder.representation == "EncoderHiddenState":
+            context = self.autoencoder.autocode(context)
+
+        gold_scores = context.new(batch_size).zero_()
+        gold_words = 0
+        allgold_scores = list()
+        decoder_output = self.decoder(tgt_input, context, src, input_lang=tgt_lang, input_pos=tgt_pos)['hidden']
+
+        output = decoder_output
+
+        if hasattr(self, 'autoencoder') and self.autoencoder and \
+                self.autoencoder.representation == "DecoderHiddenState":
+            output = self.autoencoder.autocode(output)
+
+        for dec_t, tgt_t in zip(output, tgt_output):
+
+            dec_out = defaultdict(lambda: None)
+            dec_out['hidden'] = dec_t.unsqueeze(0)
+            dec_out['src'] = src
+            dec_out['context'] = context
+
+            if isinstance(self.generator, nn.ModuleList):
+                gen_t = self.generator[0](dec_out)
+            else:
+                gen_t = self.generator(dec_out)
+            gen_t = gen_t.squeeze(0)
+            tgt_t = tgt_t.unsqueeze(1)
+            scores = gen_t.gather(1, tgt_t)
+            scores.masked_fill_(tgt_t.eq(onmt.constants.PAD), 0)
+            gold_scores += scores.squeeze(1).type_as(gold_scores)
+            gold_words += tgt_t.ne(onmt.constants.PAD).sum().item()
+            allgold_scores.append(scores.squeeze(1).type_as(gold_scores))
+
+        return gold_words, gold_scores, allgold_scores
+
+    def renew_buffer(self, new_len):
+        self.decoder.renew_buffer(new_len)
+
+    def step(self, input_t, decoder_state, streaming=False):
+        """
+        Decoding function:
+        generate new decoder output based on the current input and current decoder state
+        the decoder state is updated in the process
+        :param streaming:
+        :param input_t: the input word index at time t
+        :param decoder_state: object DecoderState containing the buffers required for decoding
+        :return: a dictionary containing: log-prob output and the attention coverage
+        """
+        output_dict = self.decoder.step(input_t, decoder_state, streaming=streaming)
+        output_dict['src'] = decoder_state.src.transpose(0, 1)
+
+        # squeeze to remove the time step dimension
+        log_prob = self.generator[0](output_dict).squeeze(0)
+
+        coverage = output_dict['coverage']
+        last_coverage = coverage[:, -1, :].squeeze(1)
+
+        # output_dict = defaultdict(lambda: None)
+
+        output_dict['log_prob'] = log_prob
+        output_dict['coverage'] = last_coverage
+
+        return output_dict
+
+    def create_decoder_state(self, batch, beam_size=1, type=1, buffering=True, **kwargs):
+        """
+        Generate a new decoder state based on the batch input
+        :param streaming:
+        :param type:
+        :param batch: Batch object (may not contain target during decoding)
+        :param beam_size: Size of beam used in beam search
+        :return:
+        """
+        src = batch.get('source')
+        src_pos = batch.get('source_pos')
+        tgt_atb = batch.get('target_atb')
+        src_lang = batch.get('source_lang')
+        tgt_lang = batch.get('target_lang')
+
+        src_transposed = src.transpose(0, 1)
+
+        encoder_output = self.encoder(src_transposed, input_pos=src_pos, input_lang=src_lang)
+        decoder_state = TransformerDecodingState(src, tgt_lang, encoder_output['context'], encoder_output['src_mask'],
+                                                 beam_size=beam_size, model_size=self.model_size,
+                                                 type=type, buffering=buffering)
+
+        if self.encoder.language_classifier and self.save_classifier_activation is not None:
+            logprobs_lan = self.generator[1](encoder_output, hidden_name='context')
+            logprobs_lan = logprobs_lan.masked_fill(encoder_output['src_mask'].permute(2, 0, 1), 0).type_as(logprobs_lan)
+
+            try:
+                saved_att = torch.load(self.save_classifier_activation)
+            except OSError:
+                saved_att = dict()
+
+            saved_att[str(len(saved_att))] = torch.exp(logprobs_lan)
+            # saved_att[str(len(saved_att))] = encoder_output['src_mask']
+            torch.save(saved_att, self.save_classifier_activation)
+
+        return decoder_state
+
+    def init_stream(self):
+
+        pass
+
+    def set_memory_size(self, src_memory_size, tgt_memory_size):
+
+        pass
+
+
+class DoubleTransformer(NMTModel):
+    """Double decoder"""
+
+    def __init__(self, encoder, decoder, decoder_aux, generator=None, mirror=False):
+        super().__init__(encoder, decoder, generator)
+        self.decoder_aux = decoder_aux  # added
+        self.model_size = self.decoder.model_size
+        self.switchout = self.decoder.switchout
+        self.tgt_vocab_size = self.decoder.word_lut.weight.size(0)
+
+        if self.encoder.input_type == 'text':
+            self.src_vocab_size = self.encoder.word_lut.weight.size(0)
+        else:
+            self.src_vocab_size = 0
+
+        if mirror:
+            self.mirror_decoder = copy.deepcopy(self.decoder)
+            self.mirror_g = nn.Linear(decoder.model_size, decoder.model_size)
+
+    def reset_states(self):
+        return
+
+    def forward(self, batch, target_mask=None, streaming=False, zero_encoder=False,
+                mirror=False, streaming_state=None):
+        """
+        :param streaming_state:
+        :param streaming:
+        :param mirror: if using mirror network for future anticipation
+        :param batch: data object sent from the dataset
+        :param target_mask:
+        :param zero_encoder: zero out the encoder output (if necessary)
+        :return:
+        """
+        if self.switchout > 0 and self.training:
+            batch.switchout(self.switchout, self.src_vocab_size, self.tgt_vocab_size)
+
+        src = batch.get('source')
+        tgt = batch.get('target_input')
+        src_pos = batch.get('source_pos')
+        tgt_pos = batch.get('target_pos')
+        src_lang = batch.get('source_lang')
+        tgt_lang = batch.get('target_lang')
+        src_lengths = batch.src_lengths
+        tgt_lengths = batch.tgt_lengths
+
+        if isinstance(src, list):  # ugly workaround to handle multi-way source data
+            for i, src_i in enumerate(src):
+                src[i] = src_i.transpose(0, 1)
+        else:
+            src = src.transpose(0, 1)  # transpose to have batch first
+        tgt = tgt.transpose(0, 1)
+
+        encoder_output = self.encoder(src, input_pos=src_pos, input_lang=src_lang, streaming=streaming,
+                                      src_lengths=src_lengths, streaming_state=streaming_state)
+
+        encoder_output = defaultdict(lambda: None, encoder_output)
+        context = encoder_output['context']
+        context_aux = encoder_output['context_aux']
+
+        # the state is changed
+        streaming_state = encoder_output['streaming_state']
+
+        # zero out the encoder part for pre-training
+        if zero_encoder:
+            context.zero_()
+
+        if isinstance(src, list):  # ugly workaround to handle multi-way source data
+            src = src[0]  # currently this takes main-lan data. will not be used in decoder (unless w/ audio input)
+        # TODO: src and tgt length!
+        decoder_output = self.decoder(tgt, context, src, input_lang=tgt_lang, input_pos=tgt_pos, streaming=streaming,
+                                      src_lengths=src_lengths, tgt_lengths=tgt_lengths, streaming_state=streaming_state,
+                                      src_mask=encoder_output['src_mask'])
+
+        # update the streaming state again
+        decoder_output = defaultdict(lambda: None, decoder_output)
+        streaming_state = decoder_output['streaming_state']
+        output = decoder_output['hidden']
+
+        output_dict = defaultdict(lambda: None)
+        output_dict['hidden'] = output
+        output_dict['context'] = context
+        output_dict['src_mask'] = encoder_output['src_mask']
+        output_dict['src'] = src
+        output_dict['target_mask'] = target_mask
+        output_dict['streaming_state'] = streaming_state
+
+        # final layer: computing softmax
+        logprobs = self.generator[0](output_dict)
+        output_dict['logprobs'] = logprobs
+
+        if context_aux is not None:
+            decoder_aux_output = self.decoder_aux(tgt, context_aux, src, input_lang=tgt_lang, input_pos=tgt_pos,
+                                                  streaming=streaming,
+                                                  src_lengths=src_lengths, tgt_lengths=tgt_lengths,
+                                                  streaming_state=streaming_state,
+                                                  src_mask=encoder_output['src_mask_aux'])
+            # also do this for aux output
+            # streaming_state_aux =
+            output_aux = decoder_aux_output['hidden']
+
+            # repeat for aux
+            output_dict['hidden_aux'] = output_aux
+            output_dict['streaming_state_aux'] = decoder_aux_output['streaming_state']
+        # # added for multi source decoder: these are passed on as part of output to calculate enc dist
+        # if isinstance(src, list):
+            output_dict['context_main'] = encoder_output['context_main']
+            output_dict['context_aux'] = encoder_output['context_aux']
+            output_dict['src_mask_main'] = encoder_output['src_mask_main']
+            output_dict['src_mask_aux'] = encoder_output['src_mask_aux']
+
+            logprobs_aux = self.generator[0](output_dict, 'hidden_aux')
+            output_dict['logprobs_aux'] = logprobs_aux
 
         # Mirror network: reverse the target sequence and perform backward language model
         if mirror:

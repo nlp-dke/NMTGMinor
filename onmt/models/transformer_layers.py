@@ -15,7 +15,6 @@ from onmt.modules.linear import FeedForward
 from onmt.modules.attention import MultiHeadAttention
 from onmt.modules.dropout import VariationalDropout
 
-
 class PrePostProcessing(nn.Module):
     """Applies processing to tensors
     Args:
@@ -40,7 +39,6 @@ class PrePostProcessing(nn.Module):
             self.k = nn.Parameter(torch.ones(1))
         
         if 'n' in self.steps:
-            
             ln = nn.LayerNorm((self.d_model,),elementwise_affine=elementwise_affine)
             self.layer_norm = Bottle(ln)
         if 'd' in self.steps:
@@ -106,7 +104,7 @@ class EncoderLayer(nn.Module):
         out: batch_size x len_query x d_model
     """
     
-    def __init__(self, h, d_model, p, d_ff, attn_p=0.1, variational=False, death_rate=0.0, change_residual=None, change_att_query=None, **kwargs):
+    def __init__(self, h, d_model, p, d_ff, attn_p=0.1, variational=False, death_rate=0.0, change_residual=None, change_att_query=None, opt=None, **kwargs):
         super(EncoderLayer, self).__init__()
         self.variational = variational
         self.death_rate = death_rate
@@ -142,9 +140,21 @@ class EncoderLayer(nn.Module):
             raise NotImplementedError
         self.feedforward = Bottle(feedforward)
 
+        # if opt.freeze_encoder:
+        #     for p in self.parameters():
+        #         p.requires_grad = False
+        #     for p in self.preprocess_attn.parameters():
+        #         p.requires_grad = False
+        #     for p in self.postprocess_attn.parameters():
+        #         p.requires_grad = False
+        #     for p in self.preprocess_ffn.parameters():
+        #         p.requires_grad = False
+        #     for p in self.postprocess_ffn.parameters():
+        #         p.requires_grad = False
+
         self.change_att_query = change_att_query
             
-    def forward(self, input, attn_mask, given_query=None):
+    def forward(self, input, attn_mask, given_query=None, att_plot_path=None):
 
         coin = True
         if self.training:
@@ -154,9 +164,9 @@ class EncoderLayer(nn.Module):
             query = self.preprocess_attn(input)
 
             if self.change_att_query is None:
-                out, _, _ = self.multihead(query, query, query, attn_mask)
+                out, _, _ = self.multihead(query, query, query, attn_mask, att_plot_path=att_plot_path)
             else:
-                out, _, _ = self.multihead(given_query, query, query, attn_mask)
+                out, _, _ = self.multihead(given_query, query, query, attn_mask, att_plot_path=att_plot_path)
 
             if self.training and self.death_rate > 0:
                 out = out / (1 - self.death_rate)
@@ -379,10 +389,10 @@ class PositionalEncoding(nn.Module):
         self.len_max = new_max_len
 
         # added with shorter wave length
-        log_timescale_increment = math.log(100) / (num_timescales - 1)
-        inv_timescales = torch.exp(torch.arange(0, num_timescales).float() * -log_timescale_increment)
-        scaled_time = position.unsqueeze(1) * inv_timescales.unsqueeze(0)
-        pos_emb_short = torch.cat((torch.sin(scaled_time), torch.cos(scaled_time)), 1)
+        log_timescale_increment_ = math.log(10) / (num_timescales - 1)
+        inv_timescales_ = torch.exp(torch.arange(0, num_timescales).float() * -log_timescale_increment_)
+        scaled_time_ = position.unsqueeze(1) * inv_timescales_.unsqueeze(0)
+        pos_emb_short = torch.cat((torch.sin(scaled_time_), torch.cos(scaled_time_)), 1)
 
         if cuda:
             pos_emb_short = pos_emb_short.cuda()
@@ -408,6 +418,7 @@ class PositionalEncoding(nn.Module):
             else:
                 time_emb = self.pos_emb[-(len_seq - 1), :]  # 1 x dim
                 out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
+
         elif change_code == 3:
             if word_emb.size(1) == len_seq:
                 time_ = self.pos_emb_short[:len_seq, :].type_as(word_emb)
@@ -417,6 +428,7 @@ class PositionalEncoding(nn.Module):
                 time_emb = self.pos_emb_short[len_seq - 1, :]  # 1 x dim
                 # out should have size bs x 1 x dim
                 out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
+
         else:
             if word_emb.size(1) == len_seq:
                 time_ = self.pos_emb[:len_seq, :].type_as(word_emb)

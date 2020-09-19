@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import onmt
-from onmt.models.transformers import TransformerEncoder, TransformerDecoder, Transformer, MixedEncoder
+from onmt.models.transformers import TransformerEncoder, TransformerDecoder, Transformer, MixedEncoder, MultiSourceEncoder, DoubleTransformer
 from onmt.models.transformer_layers import PositionalEncoding
 from onmt.models.relative_transformer import SinusoidalPositionalEmbedding, RelativeTransformer
 from onmt.modules.copy_generator import CopyGenerator
@@ -46,6 +46,12 @@ def build_tm_model(opt, dicts):
     else:
         generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
                                                           fix_norm=opt.fix_norm_output_embedding)]
+
+    if opt.language_classifier:
+        generators.append(onmt.modules.base_seq2seq.Classifier(hidden_size=opt.model_size,
+                                                               output_size=dicts['langs'].size()+1,  # padding is 0
+                                                               fix_norm=False, grad_scale=opt.gradient_scale,
+                                                               reversed_loss_landscape=opt.reverse_loss_landscape))
 
     # BUILD EMBEDDINGS
     if 'src' in dicts:
@@ -92,6 +98,25 @@ def build_tm_model(opt, dicts):
         decoder = TransformerDecoder(opt, embedding_tgt, positional_encoder, language_embeddings=language_embeddings)
 
         model = Transformer(encoder, decoder, nn.ModuleList(generators), mirror=opt.mirror_loss)
+
+    elif opt.model == 'multi_source_target_transformer':
+        print('*** Multi source-target encoder')
+
+        if opt.encoder_type == "text":
+            encoder_main = TransformerEncoder(opt, embedding_src, positional_encoder, opt.encoder_type,
+                                              language_embeddings=language_embeddings)
+            encoder_aux = encoder_main
+            encoder = MultiSourceEncoder(opt, embedding_src, encoder_main, encoder_aux)
+
+            decoder_main = TransformerDecoder(opt, embedding_tgt, positional_encoder,
+                                              language_embeddings=language_embeddings)
+            decoder_aux = decoder_main
+            # decoder = MultiSourceDecoder(opt, decoder_main, decoder_aux, embedding_tgt, positional_encoder)
+
+        else:
+            raise NotImplementedError('Not implemented')
+
+        model = DoubleTransformer(encoder, decoder_main, decoder_aux, nn.ModuleList(generators), mirror=opt.mirror_loss)
 
     elif opt.model == 'relative_transformer':
 
@@ -320,15 +345,15 @@ def optimize_model(model):
 
         except ModuleNotFoundError:
             replacable = False
-
-        if replacable:
-            for attr_str in dir(m):
-                target_attr = getattr(m, attr_str)
-                if type(target_attr) == torch.nn.LayerNorm:
-                    setattr(m, attr_str, FusedLayerNorm(target_attr.normalized_shape,
-                                                        eps=target_attr.eps,
-                                                        elementwise_affine=target_attr.elementwise_affine))
-            for n, ch in m.named_children():
-                replace_layer_norm(ch, n)
+        #
+        # if replacable:
+        #     for attr_str in dir(m):
+        #         target_attr = getattr(m, attr_str)
+        #         if type(target_attr) == torch.nn.LayerNorm:
+        #             setattr(m, attr_str, FusedLayerNorm(target_attr.normalized_shape,
+        #                                                 eps=target_attr.eps,
+        #                                                 elementwise_affine=target_attr.elementwise_affine))
+        #     for n, ch in m.named_children():
+        #         replace_layer_norm(ch, n)
 
     replace_layer_norm(model, "Transformer")

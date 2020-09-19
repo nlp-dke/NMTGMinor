@@ -59,7 +59,7 @@ class MultiHeadAttention(nn.Module):
             self.attn_dropout = nn.Dropout(attn_p)
 
     def forward(self, query, key, value, mask,
-                incremental=False, incremental_cache=None):
+                incremental=False, incremental_cache=None, att_plot_path=None):
 
         len_query, b = query.size(0), query.size(1)
 
@@ -125,6 +125,18 @@ class MultiHeadAttention(nn.Module):
         # FP16 support: cast to float and back
         attns = attns.float().masked_fill_(mask_, -float('inf')).type_as(attns)
         attns = F.softmax(attns.float(), dim=-1).type_as(attns)
+
+        # visualize
+        if att_plot_path is not None:
+            for head_idx in range(self.h):
+                try:
+                    saved_att = torch.load(att_plot_path)
+                except OSError:
+                    saved_att = dict()
+
+                saved_att[str(len(saved_att))] = attns.squeeze(0).squeeze(1)[head_idx, :]
+                torch.save(saved_att, att_plot_path)
+
         # return mean attention from all heads as coverage
         coverage = torch.mean(attns, dim=1)
         attns = self.attn_dropout(attns)

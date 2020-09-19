@@ -45,6 +45,39 @@ class CrossEntropyLossBase(_Loss):
 
         return loss, loss_data
 
+    def _compute_adv_loss(self, scores, targets, reverse_landscape=False):
+        # no label smoothing
+        gtruth = targets.view(-1)  # batch * time
+
+        # logits = logits.view(-1, logits.size(-1))  # (B * T) x V
+        # lprobs = (1.0 - F.softmax(logits, dim=-1, dtype=torch.float32)).log()
+        #
+        # non_pad_mask = gtruth.ne(self.padding_idx)
+        # nll_loss = -lprobs.gather(1, gtruth.unsqueeze(1))[non_pad_mask]
+        # nll_loss = nll_loss.sum()
+        # loss = -nll_loss
+        # loss_data = -loss.data.item()
+
+        scores = scores.view(-1, scores.size(-1))  # batch * time X vocab_size
+
+        lprobs = scores
+
+        non_pad_mask = gtruth.ne(self.padding_idx)
+        nll_loss = -lprobs.gather(1, gtruth.unsqueeze(1))[non_pad_mask]
+        # smooth_loss = -lprobs.sum(dim=-1, keepdim=True)[non_pad_mask]
+        nll_loss = nll_loss.sum()
+        # smooth_loss = smooth_loss.sum()
+        # eps_i = self.smoothing_value
+        # loss = (1. - self.label_smoothing) * nll_loss + eps_i * smooth_loss
+        if reverse_landscape:
+            loss = -nll_loss
+            loss_data = -loss.data.item()
+        else:
+            loss = nll_loss
+            loss_data = loss.data.item()
+
+        return loss, loss_data
+
     def forward(self, model_outputs, targets, hiddens, **kwargs):
 
         return NotImplementedError
@@ -54,7 +87,7 @@ class NMTLossFunc(CrossEntropyLossBase):
     """
     Standard NMT Loss Computation.
     """
-    def __init__(self, hidden_size, output_size, label_smoothing, mirror=False):
+    def __init__(self, hidden_size, output_size, label_smoothing, mirror=False, aux_loss_code=None, aux_loss_weight=0.0):
         super(NMTLossFunc, self).__init__(output_size, label_smoothing)
         self.output_size = output_size
         self.padding_idx = onmt.constants.PAD
@@ -63,7 +96,14 @@ class NMTLossFunc(CrossEntropyLossBase):
         self.label_smoothing = label_smoothing
         self.mirror = mirror
 
-    def forward(self, model_outputs, targets, model=None, backward=False, normalizer=1, **kwargs):
+        self.aux_loss_code = aux_loss_code
+        if self.aux_loss_code is not None:
+            self.sim_loss_base = self.aux_loss_code // 10
+            self.sim_loss_type = self.aux_loss_code % 10
+            self.aux_loss_weight = aux_loss_weight
+
+    def forward(self, model_outputs, targets, model=None, backward=False, normalizer=1, lan_classifier=False,
+                reverse_landscape=False, **kwargs):
         """
         Compute the loss. Subclass must define this method.
         Args:
@@ -79,7 +119,8 @@ class NMTLossFunc(CrossEntropyLossBase):
         """
 
         outputs = model_outputs['hidden']
-        logprobs = model_outputs['logprobs']
+        logprobs = model_outputs['logprobs'] if not lan_classifier else model_outputs['logprobs_lan']
+
         mirror = self.mirror
 
         if mirror:
@@ -89,7 +130,8 @@ class NMTLossFunc(CrossEntropyLossBase):
 
             alpha = 1.0
 
-        loss, loss_data = self._compute_loss(logprobs, targets)
+        loss, loss_data = self._compute_loss(logprobs, targets) if not lan_classifier \
+            else self._compute_adv_loss(logprobs, targets, reverse_landscape=reverse_landscape)  # no label smoothing
 
         total_loss = loss
 
@@ -120,7 +162,57 @@ class NMTLossFunc(CrossEntropyLossBase):
         if backward:
             total_loss.div(normalizer).backward()
 
+        if self.aux_loss_code is not None and 'context_main' in model_outputs:  # use aux loss & is training time
+            # context is T x B x H, e.g. 10, 128, 512
+            b_size = model_outputs['context_main'].shape[1]
+            if self.sim_loss_base == 1:  # position by position difference, shorter one
+                diff = model_outputs['context_main'] - model_outputs['context_aux']
+                src_mask = model_outputs['src_mask'].permute(2, 0, 1)  # B, H, T
+                diff = diff.float().masked_fill_(src_mask, 0).type_as(diff)  #inplace
+            elif self.sim_loss_base == 2:  # max pool over time
+                # print(torch.max(model_outputs['context_main'], 0)[0].shape, model_outputs['context_aux'].shape)
+                src_mask_main = model_outputs['src_mask_main'].permute(2, 0, 1)
+                src_mask_aux = model_outputs['src_mask_aux'].permute(2, 0, 1)
+                main_ = model_outputs['context_main']
+                aux_ = model_outputs['context_aux']
+                masked_main = main_.float().masked_fill(src_mask_main, -float('inf')).type_as(main_)
+                masked_aux = aux_.float().masked_fill(src_mask_aux, -float('inf')).type_as(aux_)
+                repr_main = torch.max(masked_main, 0)[0]
+                repr_aux = torch.max(masked_aux, 0)[0]
+                diff = repr_main - repr_aux
+            elif self.sim_loss_base == 3:  # mean pool over time
+                src_mask_main = model_outputs['src_mask_main'].permute(2, 0, 1)
+                src_mask_aux = model_outputs['src_mask_aux'].permute(2, 0, 1)
+                main_ = model_outputs['context_main']
+                aux_ = model_outputs['context_aux']
+                masked_main = main_.float().masked_fill(src_mask_main, 0).type_as(main_)
+                masked_aux = aux_.float().masked_fill(src_mask_aux, 0).type_as(aux_)
+                repr_main = torch.sum(masked_main, dim=0, keepdim=True) / (1 - src_mask_main.float()).sum(dim=0)
+                repr_aux = torch.sum(masked_aux, dim=0, keepdim=True) / (1 - src_mask_aux.float()).sum(dim=0)
+                diff = repr_main - repr_aux
+            else:
+                raise NotImplementedError
+
+            if self.sim_loss_type == 1:  # MSE
+                sim_loss = (diff ** 2).sum()
+            else:
+                raise NotImplementedError
+
+            sim_loss_data = (sim_loss / b_size).data.item()  # before applying weights
+            # apply weights
+            if self.aux_loss_weight >= 0:
+                sim_loss = sim_loss * self.aux_loss_weight
+            else:
+                raise NotImplementedError
+
+            # divide by # of sequences in batch
+            sim_loss = sim_loss / b_size
+
         output_dict = {"loss": loss, "data": loss_data}
+
+        if self.aux_loss_code is not None:
+            output_dict["sim_loss"] = sim_loss
+            output_dict["sim_loss_data"] = sim_loss_data
 
         # return loss, loss_data, None
         return output_dict

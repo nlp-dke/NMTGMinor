@@ -256,6 +256,22 @@ def main():
         checkpoint = torch.load(opt.load_from, map_location=lambda storage, loc: storage)
         print("* Loading dictionaries from the checkpoint")
         dicts = checkpoint['dicts']
+
+        if opt.load_vocab_from_data is not None:
+            vocab_data = torch.load(opt.load_vocab_from_data, map_location=lambda storage, loc: storage)
+            # TODO: OVERWRITE src and tgt?
+            # dicts['src'] = vocab_data['dicts']['src']
+            # dicts['tgt'] = vocab_data['dicts']['tgt']
+            for tok in vocab_data['dicts']['src'].labelToIdx:  # toks in new language
+                dicts['src'].add(tok)
+            for tok in vocab_data['dicts']['tgt'].labelToIdx:  # toks new language
+                dicts['tgt'].add(tok)
+            for lan in vocab_data['dicts']['langs']:  # new language
+                if lan not in dicts['langs']:
+                    print(' *** adding language dict {0} to {1}'.format(lan, dicts['langs']))
+                    dicts['langs'][lan] = len(dicts['langs'])
+                    print(' *** added language dict {0} to {1}'.format(lan, dicts['langs']))
+
     else:
         dicts['tgt'].patch(opt.patch_vocab_multiplier)
         checkpoint = None

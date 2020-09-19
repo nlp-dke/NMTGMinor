@@ -23,7 +23,7 @@ class Batch(object):
                  src_type='text',
                  src_align_right=False, tgt_align_right=False,
                  augmenter=None, upsampling=False,
-                 merge=False, **kwargs):
+                 merge=False, token_level_lang=False, **kwargs):
         """
         :param src_data: list of source tensors
         :param tgt_data: list of target tensors
@@ -83,7 +83,17 @@ class Batch(object):
         self.size = len(src_data) if src_data is not None else len(tgt_data)
 
         if src_lang_data is not None:
-            self.tensors['source_lang'] = torch.cat(src_lang_data).long()
+            self.tensors['source_lang'] = torch.cat(src_lang_data).long()  # per sentence
+
+            if token_level_lang:  # prepare token-level prediction targets
+                sl_ = self.tensors['source_lang']  # sl_.shape[0]
+                out_dims = (max(self.src_lengths).item(), sl_.shape[0])
+                out_tensor = sl_.data.new(*out_dims).fill_(onmt.constants.PAD)
+                for i, v in enumerate(sl_):
+                    out_tensor[:self.src_lengths[i], i] = v
+
+                self.tensors['targets_source_lang'] = out_tensor + 1  # lan ID starts with 0, pred label starts with 1
+
         if tgt_lang_data is not None:
             self.tensors['target_lang'] = torch.cat(tgt_lang_data).long()
 
