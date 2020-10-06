@@ -731,6 +731,9 @@ def main():
         src_langs = opt.valid_src_lang.split("|")
         tgt_langs = opt.valid_tgt_lang.split("|")
 
+        print('***', src_input_files, src_langs)
+        print('***', tgt_input_files, tgt_langs)
+
         assert len(src_input_files) == len(src_langs)
         assert len(src_input_files) == len(tgt_input_files)
         assert len(tgt_input_files) == len(tgt_langs)

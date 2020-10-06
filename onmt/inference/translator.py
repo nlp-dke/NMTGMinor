@@ -72,12 +72,13 @@ class Translator(object):
 
                 if "langs" in checkpoint["dicts"]:
                     self.lang_dict = checkpoint['dicts']['langs']
+                    # print("=====================lang_dict", checkpoint['dicts']['langs'])
 
                 else:
-                    self.lang_dict = { 'src': 0, 'tgt': 1}
+                    self.lang_dict = {'src': 0, 'tgt': 1}
 
                 self.bos_id = self.tgt_dict.labelToIdx[self.bos_token]
-                print("=====================BOS", self.bos_id)
+                print("=====================BOS", self.bos_id,  self.lang_dict)
 
             # Build model from the saved option
             # if hasattr(model_opt, 'fusion') and model_opt.fusion == True:
@@ -262,15 +263,19 @@ class Translator(object):
         if self.opt.no_bos_gold:
             tgt_bos_word = None
         tgt_data = None
+
         if tgt_sents:
             tgt_data = [self.tgt_dict.convertToIdx(b,
                                                    onmt.constants.UNK_WORD,
                                                    tgt_bos_word,
                                                    onmt.constants.EOS_WORD) for b in tgt_sents]
-        print('*** BOS', tgt_bos_word)
+        print('*** BOS string', tgt_bos_word)
         print('lang dict', self.lang_dict, self.lang_dict[self.src_lang], self.lang_dict[self.tgt_lang])
-        src_lang_data = [torch.Tensor([self.lang_dict[self.src_lang]])]
+
+        src_lang_data = [torch.Tensor([self.lang_dict[self.src_lang]])]  # indices in lang dict
+        print('*** src lan index', src_lang_data)
         tgt_lang_data = [torch.Tensor([self.lang_dict[self.tgt_lang]])]
+        print('*** tgt lan index', tgt_lang_data)
 
         return onmt.Dataset(src_data, tgt_data,
                             src_langs=src_lang_data, tgt_langs=tgt_lang_data,

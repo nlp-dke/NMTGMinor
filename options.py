@@ -270,8 +270,15 @@ def make_parser(parser):
 
     parser.add_argument('-language_classifier', action='store_true',
                         help='Whether to use a language classifier')
+    parser.add_argument('-language_classifier_tok', action='store_true',
+                        help='Whether to use a language classifier (tok level)')
     parser.add_argument('-language_classifier_sent', action='store_true',
                         help='Whether to use a language classifier (sent level)')
+    parser.add_argument('-language_classifer_mid_layer_size', type=int, default=0,
+                        help='If > 0, add aother FC layer for language classifier of this size.')
+
+    parser.add_argument('-num_classifier_languages', type=int, default=2,
+                        help='NUmber of languages to classify.')
     parser.add_argument('-gradient_scale', type=float, default=1.0,
                         help='Scale for flipped gradient')
 
@@ -280,7 +287,7 @@ def make_parser(parser):
     parser.add_argument('-save_activation', type=str, default=None,
                         help='If not None, save encoder att distribution from the layer where change is applied.')
     parser.add_argument('-save_classifier_activation', type=str, default=None,
-                        help='If not None, save encoder att distribution from the layer where change is applied..')
+                        help='If not None, save encoder att distribution from the layer where change is applied.')
 
     parser.add_argument('-load_vocab_from_data', type=str, default=None,
                         help="""When resuming from checkpoints, load vocab from training data instead of from previouis checkpoints.""")
@@ -401,6 +408,12 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'language_classifier_sent'):
         opt.language_classifier_sent = False
+
+    if not hasattr(opt, 'language_classifer_mid_layer_size'):
+        opt.language_classifer_mid_layer_size = 0
+
+    if not hasattr(opt, 'num_classifier_languages'):
+        opt.num_classifier_languages = 2
 
     if not hasattr(opt, 'gradient_scale'):
         opt.gradient_scale = 1.0

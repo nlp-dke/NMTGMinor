@@ -76,8 +76,8 @@ class NMTModel(nn.Module):
                     return False
             if param_name == 'decoder.mask':
                 return False
-            # if param_name == 'generator.1.linear.weight' or param_name == 'generator.1.linear.bias':  # TODO
-            #     return False
+            # if 'generator.1' in param_name: #TODO: need to when training classifier
+            #     return Falses
             return True
 
         # restore old generated if necessary for loading
@@ -150,44 +150,64 @@ class DecoderState(object):
 
 class Classifier(nn.Module):
 
-    def __init__(self, hidden_size, output_size, fix_norm=False, grad_scale=1.0, reversed_loss_landscape=True):
+    def __init__(self, hidden_size, output_size, fix_norm=False, grad_scale=1.0, mid_layer_size=0):
 
         super(Classifier, self).__init__()
+
         self.hidden_size = hidden_size
         self.output_size = output_size
-        self.linear = nn.Linear(hidden_size, output_size)
+        self.mid_layer_size = mid_layer_size
         self.fix_norm = fix_norm
 
-        stdv = 1.0 / math.sqrt(self.linear.weight.size(1))
+        if self.mid_layer_size == 0:
+            self.linear = nn.Linear(hidden_size, output_size)
+            stdv = 1.0 / math.sqrt(self.linear.weight.size(1))
+            torch.nn.init.uniform_(self.linear.weight, -stdv, stdv)
 
-        torch.nn.init.uniform_(self.linear.weight, -stdv, stdv)
+            self.linear.bias.data.zero_()
 
-        self.linear.bias.data.zero_()
+        else:
+            self.relu = torch.nn.ReLU()
+            self.linear = nn.Linear(hidden_size, mid_layer_size)
+            self.linear2 = nn.Linear(mid_layer_size, output_size)
+
+            for w in [self.linear, self.linear2]:
+                stdv = 1.0 / math.sqrt(w.weight.size(1))
+                torch.nn.init.uniform_(w.weight, -stdv, stdv)
+                w.bias.data.zero_()
 
         self.grad_scale = grad_scale
-        self.reversed_loss_landscape = reversed_loss_landscape
+        # self.reversed_loss_landscape = reversed_loss_landscape
 
     # def forward(self, input, log_softmax=True):
     def forward(self, output_dicts, hidden_name='hidden'):
 
         classifier_input = output_dicts[hidden_name]
         fix_norm = self.fix_norm
-        #
+
         if self.training:
             classifier_input = grad_reverse(classifier_input, self.grad_scale)
 
         # added float to the end
-        if not fix_norm:
-            logits = self.linear(classifier_input).float()
+        if self.mid_layer_size == 0:
+            if not fix_norm:
+                logits = self.linear(classifier_input).float()
+            else:
+                normalized_weights = F.normalize(self.linear.weight, dim=-1)
+                normalized_bias = self.linear.bias
+                logits = F.linear(classifier_input, normalized_weights, normalized_bias).float()
         else:
-            normalized_weights = F.normalize(self.linear.weight, dim=-1)
-            normalized_bias = self.linear.bias
-            logits = F.linear(classifier_input, normalized_weights, normalized_bias).float()
+            if not fix_norm:
+                hid = self.linear(classifier_input).float()
+                relu = self.relu(hid)
+                logits = self.linear2(relu)
+            else:
+                raise NotImplementedError
 
-        if self.reversed_loss_landscape:
-            output = (1.0 - (F.softmax(logits, dim=-1))).log_()  # reversed, when training adversarially  # dtype=torch.float32
-        else:
-            output = F.log_softmax(logits, dim=-1)
+        # if self.reversed_loss_landscape:
+        #     output = F.log_softmax(1.0 - (F.softmax(logits, dim=-1)), dim=-1)  # reversed, when training adversarially  # dtype=torch.float32
+        # else:
+        output = F.log_softmax(logits, dim=-1)
         return output
 
 

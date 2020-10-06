@@ -83,6 +83,7 @@ class Batch(object):
         self.size = len(src_data) if src_data is not None else len(tgt_data)
 
         if src_lang_data is not None:
+
             self.tensors['source_lang'] = torch.cat(src_lang_data).long()  # per sentence
 
             if token_level_lang:  # prepare token-level prediction targets
@@ -90,9 +91,12 @@ class Batch(object):
                 out_dims = (max(self.src_lengths).item(), sl_.shape[0])
                 out_tensor = sl_.data.new(*out_dims).fill_(onmt.constants.PAD)
                 for i, v in enumerate(sl_):
-                    out_tensor[:self.src_lengths[i], i] = v
+                    # lan ID starts with 0 but pred label values should start with 1 (due to padding)
+                    out_tensor[:(self.src_lengths[i]), i] = v+1
 
-                self.tensors['targets_source_lang'] = out_tensor + 1  # lan ID starts with 0, pred label starts with 1
+                # uni, uni_cnt = torch.unique(out_tensor, return_counts=True)
+                # print('=========================', uni, uni_cnt)
+                self.tensors['targets_source_lang'] = out_tensor
 
         if tgt_lang_data is not None:
             self.tensors['target_lang'] = torch.cat(tgt_lang_data).long()
@@ -234,6 +238,7 @@ class Dataset(torch.utils.data.Dataset):
                  augment=False,
                  src_align_right=False, tgt_align_right=False,
                  verbose=False, cleaning=False,
+                 token_level_lang=False,
                  **kwargs):
         """
         :param src_data: List of tensors for the source side (1D for text, 2 or 3Ds for other modalities)
@@ -348,6 +353,7 @@ class Dataset(torch.utils.data.Dataset):
             if sorting:
                 self.src_langs = [self.src_langs[i] for i in sorted_order]
                 self.tgt_langs = [self.tgt_langs[i] for i in sorted_order]
+        print('bilingual', self.bilingual)  # TODO: true?
 
         self.fullSize = len(self.src) if self.src is not None else len(self.tgt)
 
@@ -375,6 +381,8 @@ class Dataset(torch.utils.data.Dataset):
             self.augmenter = Augmenter()
         else:
             self.augmenter = None
+
+        self.token_level_lang = token_level_lang
 
     def size(self):
 
@@ -486,7 +494,8 @@ class Dataset(torch.utils.data.Dataset):
                       src_lang_data=src_lang_data, tgt_lang_data=tgt_lang_data,
                       src_align_right=self.src_align_right, tgt_align_right=self.tgt_align_right,
                       src_type=self._type,
-                      augmenter=self.augmenter, upsampling=self.upsampling)
+                      augmenter=self.augmenter, upsampling=self.upsampling,
+                      token_level_lang=self.token_level_lang)
 
         return batch
 

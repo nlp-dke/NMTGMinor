@@ -45,36 +45,36 @@ class CrossEntropyLossBase(_Loss):
 
         return loss, loss_data
 
-    def _compute_adv_loss(self, scores, targets, reverse_landscape=False):
+    def _compute_adv_loss(self, scores, targets, reverse_landscape=False, multiclass=False):
         # no label smoothing
-        gtruth = targets.view(-1)  # batch * time
-
-        # logits = logits.view(-1, logits.size(-1))  # (B * T) x V
-        # lprobs = (1.0 - F.softmax(logits, dim=-1, dtype=torch.float32)).log()
-        #
-        # non_pad_mask = gtruth.ne(self.padding_idx)
-        # nll_loss = -lprobs.gather(1, gtruth.unsqueeze(1))[non_pad_mask]
-        # nll_loss = nll_loss.sum()
-        # loss = -nll_loss
-        # loss_data = -loss.data.item()
-
-        scores = scores.view(-1, scores.size(-1))  # batch * time X vocab_size
-
-        lprobs = scores
-
-        non_pad_mask = gtruth.ne(self.padding_idx)
-        nll_loss = -lprobs.gather(1, gtruth.unsqueeze(1))[non_pad_mask]
-        # smooth_loss = -lprobs.sum(dim=-1, keepdim=True)[non_pad_mask]
-        nll_loss = nll_loss.sum()
-        # smooth_loss = smooth_loss.sum()
-        # eps_i = self.smoothing_value
-        # loss = (1. - self.label_smoothing) * nll_loss + eps_i * smooth_loss
-        if reverse_landscape:
-            loss = -nll_loss
-            loss_data = -loss.data.item()
-        else:
+        # Note: language ID starts from 1
+        if not reverse_landscape:
+            gtruth = targets.view(-1)  # 1D, (batch X time).
+            scores = scores.view(-1, scores.size(-1))  # 2D, batch * (time X vocab_size)
+            lprobs = scores
+            non_pad_mask = gtruth.ne(self.padding_idx)
+            nll_loss = -lprobs.gather(1, torch.clamp(gtruth.unsqueeze(1)-1, min=0))[non_pad_mask]
+            nll_loss = nll_loss.sum()
             loss = nll_loss
-            loss_data = loss.data.item()
+        else:
+            gtruth = targets.view(-1)  # 1D, (batch X time). # -1 due to language ID from 1
+            scores = scores.view(-1, scores.size(-1))  # 2D, batch * (time X vocab_size)
+            lprobs = scores
+            non_pad_mask = gtruth.ne(self.padding_idx)
+            # # gtruth_complement = torch.ones((gtruth.shape[0], gtruth.max()+1), dtype=torch.long).to(device='cuda')
+            # # gtruth_complement[torch.arange(gtruth.shape[0]), gtruth] = 0
+            # # 2D, time * vocab_size
+            total_tok = gtruth.shape[0]
+            num_classes = scores.nelement() / total_tok
+            base = torch.arange(num_classes, dtype=torch.long).to(device='cuda').unsqueeze(0).repeat(total_tok, 1)
+            chosen_bol = torch.arange(num_classes).to(device='cuda').unsqueeze(1) != torch.clamp(gtruth-1, min=0)  # other than label index
+            remaining = base[chosen_bol.T].view(total_tok, -1)
+            #
+            nll_loss = -lprobs.gather(1, remaining)[non_pad_mask]
+            nll_loss = nll_loss.sum()
+            loss = -nll_loss  # reverse
+
+        loss_data = loss.data.item()
 
         return loss, loss_data
 

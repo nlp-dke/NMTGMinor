@@ -234,8 +234,9 @@ class TransformerEncoder(nn.Module):
         self.build_modules(opt)
 
         if opt.freeze_encoder:
-            for p in self.parameters():
-                p.requires_grad = False
+            self.requires_grad_(False)
+            # for p in self.parameters():
+            #     p.requires_grad = False
 
         self.language_classifier = opt.language_classifier
         self.language_classifier_sent = opt.language_classifier_sent
@@ -423,7 +424,7 @@ class TransformerDecoder(nn.Module):
         self.word_lut = embedding
 
         # Using feature embeddings in models
-        self.language_embeddings = language_embeddings
+        self.language_embeddings = language_embeddings  # feat_lut
 
         if self.language_embedding_type == 'concat':
             self.projector = nn.Linear(opt.model_size * 2, opt.model_size)
@@ -440,8 +441,9 @@ class TransformerDecoder(nn.Module):
         self.build_modules()
 
         if opt.freeze_decoder:
-            for p in self.parameters():
-                p.requires_grad = False
+            self.requires_grad_(False)
+            # for p in self.parameters():
+                # p.requires_grad = False
                 # print('Require grad in Transformer Decoder:', p.requires_grad)
 
     def build_modules(self):
@@ -495,7 +497,7 @@ class TransformerDecoder(nn.Module):
             elif self.language_embedding_type == 'concat':
                 # replace the bos embedding with the language
                 bos_emb = lang_emb.expand_as(emb[:, 0, :])
-                emb[:, 0, :] = bos_emb
+                emb[:, 0, :] = bos_emb  # B, T, Dim
 
                 lang_emb = lang_emb.unsqueeze(1).expand_as(emb)
                 concat_emb = torch.cat([emb, lang_emb], dim=-1)
@@ -604,13 +606,22 @@ class TransformerDecoder(nn.Module):
                 emb = emb + lang_emb
             elif self.language_embedding_type == 'concat':
                 # replace the bos embedding with the language
-                if input.size(1) == 1:
+                if input.size(1) == 1:  # at 1st time step
                     bos_emb = lang_emb.expand_as(emb[:, 0, :])
                     emb[:, 0, :] = bos_emb
 
                 lang_emb = lang_emb.unsqueeze(1).expand_as(emb)
                 concat_emb = torch.cat([emb, lang_emb], dim=-1)
                 emb = torch.relu(self.projector(concat_emb))
+
+                # if self.enable_feature:
+                #     input_attbs = input_attbs.unsqueeze(1)
+                #     attb_emb = self.feat_lut(input_attbs)
+                #
+                #     emb = torch.cat([emb, attb_emb], dim=-1)
+                #
+                #     emb = torch.relu(self.feature_projector(emb))
+
             else:
                 raise NotImplementedError
 

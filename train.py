@@ -81,7 +81,8 @@ def main():
                                       batch_size_sents=opt.batch_size_sents,
                                       multiplier=opt.batch_size_multiplier,
                                       augment=opt.augment_speech,
-                                      upsampling=opt.upsampling)
+                                      upsampling=opt.upsampling,
+                                      token_level_lang=opt.language_classifier_tok)
         else:
             train_data = onmt.StreamDataset(train_dict['src'], train_dict['tgt'],
                                             train_src_langs, train_tgt_langs,
@@ -111,7 +112,8 @@ def main():
                                       batch_size_words=opt.batch_size_words,
                                       data_type=dataset.get("type", "text"), sorting=True,
                                       batch_size_sents=opt.batch_size_sents,
-                                      upsampling=opt.upsampling)
+                                      upsampling=opt.upsampling,
+                                      token_level_lang=opt.language_classifier_tok)
         else:
             valid_data = onmt.StreamDataset(valid_dict['src'], valid_dict['tgt'],
                                             valid_src_langs, valid_tgt_langs,
@@ -167,7 +169,8 @@ def main():
                                       multiplier=opt.batch_size_multiplier,
                                       src_align_right=opt.src_align_right,
                                       upsampling=opt.upsampling,
-                                      cleaning=True , verbose=True)
+                                      cleaning=True, verbose=True,
+                                      token_level_lang=opt.language_classifier_tok)
         else:
             train_data = onmt.StreamDataset(train_src,
                                             train_tgt,
@@ -201,7 +204,8 @@ def main():
                                       data_type="text", sorting=False,
                                       batch_size_sents=opt.batch_size_sents,
                                       src_align_right=opt.src_align_right,
-                                      cleaning=True, verbose=True)
+                                      cleaning=True, verbose=True,
+                                      token_level_lang=opt.language_classifier_tok)
         else:
             # for validation data, we have to go through sentences (very slow but to ensure correctness)
             valid_data = onmt.StreamDataset(valid_src, valid_tgt,
@@ -260,17 +264,21 @@ def main():
         if opt.load_vocab_from_data is not None:
             vocab_data = torch.load(opt.load_vocab_from_data, map_location=lambda storage, loc: storage)
             # TODO: OVERWRITE src and tgt?
-            # dicts['src'] = vocab_data['dicts']['src']
-            # dicts['tgt'] = vocab_data['dicts']['tgt']
-            for tok in vocab_data['dicts']['src'].labelToIdx:  # toks in new language
-                dicts['src'].add(tok)
-            for tok in vocab_data['dicts']['tgt'].labelToIdx:  # toks new language
-                dicts['tgt'].add(tok)
+            dicts['src'] = vocab_data['dicts']['src']
+            dicts['tgt'] = vocab_data['dicts']['tgt']
+            # for tok in vocab_data['dicts']['src'].labelToIdx:  # toks in new language
+            #     dicts['src'].add(tok)
+            # for tok in vocab_data['dicts']['tgt'].labelToIdx:  # toks new language
+            #     dicts['tgt'].add(tok)
+
+            # TODO: doesn't really hurt supervised directions when re-initializing this?
+             # if len(vocab_data['dicts']['langs']) > dicts['langs']:
             for lan in vocab_data['dicts']['langs']:  # new language
                 if lan not in dicts['langs']:
-                    print(' *** adding language dict {0} to {1}'.format(lan, dicts['langs']))
                     dicts['langs'][lan] = len(dicts['langs'])
                     print(' *** added language dict {0} to {1}'.format(lan, dicts['langs']))
+            # else::q
+            # dicts['langs'] = vocab_data['dicts']['langs']
 
     else:
         dicts['tgt'].patch(opt.patch_vocab_multiplier)

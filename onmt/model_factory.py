@@ -49,9 +49,9 @@ def build_tm_model(opt, dicts):
 
     if opt.language_classifier:
         generators.append(onmt.modules.base_seq2seq.Classifier(hidden_size=opt.model_size,
-                                                               output_size=dicts['langs'].size()+1,  # padding is 0
+                                                               output_size=opt.num_classifier_languages,  # padding is 0
                                                                fix_norm=False, grad_scale=opt.gradient_scale,
-                                                               reversed_loss_landscape=opt.reverse_loss_landscape))
+                                                               mid_layer_size=opt.language_classifer_mid_layer_size))
 
     # BUILD EMBEDDINGS
     if 'src' in dicts:
