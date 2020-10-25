@@ -357,7 +357,7 @@ class TransformerEncoder(nn.Module):
         for i, layer in enumerate(self.layer_modules):
             context = layer(context, mask_src, given_query=given_query, att_plot_path=self.att_plot_path)   # batch_size x len_src x d_model
 
-            if self.save_activation is not None:
+            if self.save_activation is not None and (i == len(self.layer_modules) - 1):
                 padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
                 try:
                     saved_att = torch.load(self.save_activation)
