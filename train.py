@@ -12,6 +12,7 @@ from onmt.model_factory import build_model, optimize_model
 from options import make_parser
 from collections import defaultdict
 import os
+import numpy as np
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 
@@ -40,7 +41,21 @@ if torch.cuda.is_available() and not opt.gpus:
 torch.manual_seed(opt.seed)
 
 
+def numpy_to_torch(tensor_list):
+
+    out_list = list()
+
+    for tensor in tensor_list:
+        if isinstance(tensor, np.ndarray):
+            out_list.append(torch.from_numpy(tensor))
+        else:
+            out_list.append(tensor)
+
+    return out_list
+
+
 def main():
+
     if opt.data_format in ['bin', 'raw']:
         start = time.time()
 
@@ -75,17 +90,20 @@ def main():
 
         if not opt.streaming:
             train_data = onmt.Dataset(train_dict['src'], train_dict['tgt'],
-                                      train_src_langs, train_tgt_langs,
+                                      src_sizes=None, tgt_sizes=None,
+                                      src_langs=train_src_langs, tgt_langs=train_tgt_langs,
                                       batch_size_words=opt.batch_size_words,
                                       data_type=dataset.get("type", "text"), sorting=True,
                                       batch_size_sents=opt.batch_size_sents,
                                       multiplier=opt.batch_size_multiplier,
                                       augment=opt.augment_speech,
                                       upsampling=opt.upsampling,
-                                      token_level_lang=opt.language_classifier_tok)
+                                      token_level_lang=opt.language_classifier_tok,
+                                      num_split=len(opt.gpus))
         else:
             train_data = onmt.StreamDataset(train_dict['src'], train_dict['tgt'],
-                                            train_src_langs, train_tgt_langs,
+                                            src_sizes=None, tgt_sizes=None,
+                                            src_langs=train_src_langs, tgt_langs=train_tgt_langs,
                                             batch_size_words=opt.batch_size_words,
                                             data_type=dataset.get("type", "text"), sorting=True,
                                             batch_size_sents=opt.batch_size_sents,
@@ -108,7 +126,8 @@ def main():
 
         if not opt.streaming:
             valid_data = onmt.Dataset(valid_dict['src'], valid_dict['tgt'],
-                                      valid_src_langs, valid_tgt_langs,
+                                      src_sizes=None, tgt_sizes=None,
+                                      src_langs=valid_src_langs, tgt_langs=valid_tgt_langs,
                                       batch_size_words=opt.batch_size_words,
                                       data_type=dataset.get("type", "text"), sorting=True,
                                       batch_size_sents=opt.batch_size_sents,
@@ -116,7 +135,8 @@ def main():
                                       token_level_lang=opt.language_classifier_tok)
         else:
             valid_data = onmt.StreamDataset(valid_dict['src'], valid_dict['tgt'],
-                                            valid_src_langs, valid_tgt_langs,
+                                            src_sizes=None, tgt_sizes=None,
+                                            src_langs=valid_src_langs, tgt_langs=valid_tgt_langs,
                                             batch_size_words=opt.batch_size_words,
                                             data_type=dataset.get("type", "text"), sorting=True,
                                             batch_size_sents=opt.batch_size_sents,
@@ -125,12 +145,15 @@ def main():
         print(' * number of training sentences. %d' % len(dataset['train']['src']))
         print(' * maximum batch size (words per batch). %d' % opt.batch_size_words)
 
-    elif opt.data_format == 'mmem':
+    elif opt.data_format in ['scp', 'scpmem', 'mmem']:
         print("Loading memory mapped data files ....")
         start = time.time()
         from onmt.data.mmap_indexed_dataset import MMapIndexedDataset
+        from onmt.data.scp_dataset import SCPIndexDataset
 
         dicts = torch.load(opt.data + ".dict.pt")
+        if opt.data_format in ['scp', 'scpmem']:
+            audio_data = torch.load(opt.data + ".scp_path.pt")
 
         # allocate languages if not
         if 'langs' not in dicts:
@@ -139,7 +162,11 @@ def main():
             print(dicts['langs'])
 
         train_path = opt.data + '.train'
-        train_src = MMapIndexedDataset(train_path + '.src')
+        if opt.data_format in ['scp', 'scpmem']:
+            train_src = SCPIndexDataset(audio_data['train'], concat=opt.concat)
+        else:
+            train_src = MMapIndexedDataset(train_path + '.src')
+
         train_tgt = MMapIndexedDataset(train_path + '.tgt')
 
         # check the lang files if they exist (in the case of multi-lingual models)
@@ -154,6 +181,13 @@ def main():
             train_src_langs.append(torch.Tensor([dicts['langs']['src']]))
             train_tgt_langs.append(torch.Tensor([dicts['langs']['tgt']]))
 
+        # check the length files if they exist
+        if os.path.exists(train_path + '.src_sizes.npy'):
+            train_src_sizes = np.load(train_path + '.src_sizes.npy')
+            train_tgt_sizes = np.load(train_path + '.tgt_sizes.npy')
+        else:
+            train_src_sizes, train_tgt_sizes = None, None
+
         if opt.encoder_type == 'audio':
             data_type = 'audio'
         else:
@@ -162,14 +196,17 @@ def main():
         if not opt.streaming:
             train_data = onmt.Dataset(train_src,
                                       train_tgt,
+                                      train_src_sizes, train_tgt_sizes,
                                       train_src_langs, train_tgt_langs,
                                       batch_size_words=opt.batch_size_words,
                                       data_type=data_type, sorting=True,
                                       batch_size_sents=opt.batch_size_sents,
                                       multiplier=opt.batch_size_multiplier,
                                       src_align_right=opt.src_align_right,
+                                      augment=opt.augment_speech,
                                       upsampling=opt.upsampling,
                                       cleaning=True, verbose=True,
+                                      num_split=len(opt.gpus),
                                       token_level_lang=opt.language_classifier_tok)
         else:
             train_data = onmt.StreamDataset(train_src,
@@ -182,7 +219,10 @@ def main():
                                             upsampling=opt.upsampling)
 
         valid_path = opt.data + '.valid'
-        valid_src = MMapIndexedDataset(valid_path + '.src')
+        if opt.data_format in ['scp', 'scpmem']:
+            valid_src = SCPIndexDataset(audio_data['valid'], concat=opt.concat)
+        else:
+            valid_src = MMapIndexedDataset(valid_path + '.src')
         valid_tgt = MMapIndexedDataset(valid_path + '.tgt')
 
         if os.path.exists(valid_path + '.src_lang.bin'):
@@ -197,21 +237,30 @@ def main():
             valid_src_langs.append(torch.Tensor([dicts['langs']['src']]))
             valid_tgt_langs.append(torch.Tensor([dicts['langs']['tgt']]))
 
+        # check the length files if they exist
+        if os.path.exists(valid_path + '.src_sizes.npy'):
+            valid_src_sizes = np.load(valid_path + '.src_sizes.npy')
+            valid_tgt_sizes = np.load(valid_path + '.tgt_sizes.npy')
+        else:
+            valid_src_sizes, valid_tgt_sizes = None, None
+
         if not opt.streaming:
             valid_data = onmt.Dataset(valid_src, valid_tgt,
+                                      valid_src_sizes, valid_tgt_sizes,
                                       valid_src_langs, valid_tgt_langs,
                                       batch_size_words=opt.batch_size_words,
-                                      data_type="text", sorting=False,
+                                      data_type=data_type, sorting=True,
                                       batch_size_sents=opt.batch_size_sents,
                                       src_align_right=opt.src_align_right,
-                                      cleaning=True, verbose=True,
+                                      cleaning=True, verbose=True, debug=True,
+                                      num_split=len(opt.gpus),
                                       token_level_lang=opt.language_classifier_tok)
         else:
             # for validation data, we have to go through sentences (very slow but to ensure correctness)
             valid_data = onmt.StreamDataset(valid_src, valid_tgt,
                                             valid_src_langs, valid_tgt_langs,
                                             batch_size_words=opt.batch_size_words,
-                                            data_type="text", sorting=True,
+                                            data_type=data_type, sorting=True,
                                             batch_size_sents=opt.batch_size_sents)
 
         elapse = str(datetime.timedelta(seconds=int(time.time() - start)))
@@ -220,48 +269,15 @@ def main():
     else:
         raise NotImplementedError
 
-    # additional_data = []
-    # if opt.additional_data != "none":
-    #     add_data = opt.additional_data.split(";")
-    #     add_format = opt.additional_data_format.split(";")
-    #     assert (len(add_data) == len(add_format))
-    #     for i in range(len(add_data)):
-    #         if add_format[i] == 'raw':
-    #             if add_data[i].endswith(".train.pt"):
-    #                 print("Loading data from '%s'" % opt.data)
-    #                 add_dataset = torch.load(add_data[i])
-    #             else:
-    #                 print("Loading data from %s" % opt.data + ".train.pt")
-    #                 add_dataset = torch.load(add_data[i] + ".train.pt")
-    #
-    #             additional_data.append(onmt.Dataset(add_dataset['train']['src'],
-    #                                                 dataset['train']['tgt'], batch_size_words=opt.batch_size_words,
-    #                                                 data_type=dataset.get("type", "text"), sorting=True,
-    #                                                 batch_size_sents=opt.batch_size_sents,
-    #                                                 multiplier=opt.batch_size_multiplier,
-    #                                                 reshape_speech=opt.reshape_speech,
-    #                                                 augment=opt.augment_speech))
-    #         elif add_format[i] == 'bin':
-    #
-    #             from onmt.data.indexed_dataset import IndexedInMemoryDataset
-    #
-    #             train_path = add_data[i] + '.train'
-    #             train_src = IndexedInMemoryDataset(train_path + '.src')
-    #             train_tgt = IndexedInMemoryDataset(train_path + '.tgt')
-    #
-    #             additional_data.append(onmt.Dataset(train_src,
-    #                                                 train_tgt,
-    #                                                 batch_size_words=opt.batch_size_words,
-    #                                                 data_type=opt.encoder_type,
-    #                                                 batch_size_sents=opt.batch_size_sents,
-    #                                                 multiplier=opt.batch_size_multiplier))
+    print(' * number of sentences in training data: %d' % train_data.size())
+    print(' * number of sentences in validation data: %d' % valid_data.size())
 
     if opt.load_from:
         checkpoint = torch.load(opt.load_from, map_location=lambda storage, loc: storage)
         print("* Loading dictionaries from the checkpoint")
         dicts = checkpoint['dicts']
 
-        if opt.load_vocab_from_data is not None:
+        if opt.load_vocab_from_data is not None:  # only useful when vocab is expanded
             vocab_data = torch.load(opt.load_vocab_from_data, map_location=lambda storage, loc: storage)
             # TODO: OVERWRITE src and tgt?
             dicts['src'] = vocab_data['dicts']['src']

@@ -1,20 +1,51 @@
 from __future__ import division
 
+
+import datetime
+import gc
+import inspect
+import math
+import os
+import re
+import time
+import torch
+from apex import amp
+
 import onmt
 import onmt.markdown
 import onmt.modules
-import torch
-from torch.autograd import Variable
-import math
-import time, datetime
-import os
-import re
-from onmt.model_factory import init_model_parameters
-from onmt.utils import checkpoint_paths, normalize_gradients
-from apex import amp
-from onmt.train_utils.stats import Logger
+from onmt.data.data_iterator import DataIterator
+from onmt.data.multidata_iterator import MultiDataIterator
+from onmt.data.dataset import rewrap
 from onmt.model_factory import build_model, build_language_model, optimize_model
+from onmt.model_factory import init_model_parameters
+from onmt.train_utils.stats import Logger
+from onmt.utils import checkpoint_paths, normalize_gradients
+
+from onmt.multiprocessing.multiprocessing_wrapper import MultiprocessingRunner
+
 import sys
+
+def varname(p):
+    for line in inspect.getframeinfo(inspect.currentframe().f_back)[3]:
+        m = re.search(r'\bvarname\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', line)
+        if m:
+            return m.group(1)
+
+
+def generate_data_iterator(dataset, seed, num_workers=1, epoch=1., buffer_size=0):
+
+    # check if dataset is a list:
+    if isinstance(dataset, list):
+        # this is a multidataset
+        data_iterator = MultiDataIterator(dataset, seed=seed, num_workers=num_workers,
+                                          epoch=epoch, buffer_size=buffer_size)
+    else:
+
+        data_iterator = DataIterator(dataset, dataset.collater, dataset.batches, seed=seed,
+                                     num_workers=num_workers, epoch=epoch, buffer_size=buffer_size)
+
+    return data_iterator
 
 class BaseTrainer(object):
 
@@ -66,6 +97,60 @@ class BaseTrainer(object):
         self.model.encoder.language_embedding = enc_language_embedding
         return
 
+    def load_decoder_weight(self, checkpoint_file):
+
+        print("Loading pretrained models from %s" % checkpoint_file)
+        checkpoint = torch.load(checkpoint_file, map_location=lambda storage, loc: storage)
+        chkpoint_dict = checkpoint['dicts']
+
+        pretrained_model = build_model(checkpoint['opt'], chkpoint_dict)
+        pretrained_model.load_state_dict(checkpoint['model'])
+
+        print("Loading pretrained decoder weights ...")
+        # first we have to remove the embeddings which probably have difference size ...
+        pretrained_word_emb = pretrained_model.decoder.word_lut
+        pretrained_model.decoder.word_lut = None
+        pretrained_lang_emb = pretrained_model.decoder.language_embeddings
+        pretrained_model.decoder.language_embeddings = None
+
+        # actually we assume that two decoders have the same language embeddings...
+        untrained_word_emb = self.model.decoder.word_lut
+        self.model.decoder.word_lut = None
+        untrained_lang_emb = self.model.decoder.language_embeddings
+        self.model.decoder.language_embeddings = None
+
+        decoder_state_dict = pretrained_model.decoder.state_dict()
+        self.model.decoder.load_state_dict(decoder_state_dict)
+
+        # now we load the embeddings ....
+        n_copies = 0
+        for token in self.dicts['tgt'].labelToIdx:
+
+            untrained_id = self.dicts['tgt'].labelToIdx[token]
+
+            if token in chkpoint_dict['tgt'].labelToIdx:
+                pretrained_id = chkpoint_dict['tgt'].labelToIdx[token]
+                untrained_word_emb.weight.data[untrained_id].copy_(pretrained_word_emb.weight.data[pretrained_id])
+
+                self.model.generator[0].linear.bias.data[untrained_id].copy_(pretrained_model
+                                                                             .generator[0].linear.bias.data[
+                                                                                 pretrained_id])
+                n_copies += 1
+
+        print("Copied embedding for %d words" % n_copies)
+        self.model.decoder.word_lut = untrained_word_emb
+
+        # now we load the language embeddings ...
+        if pretrained_lang_emb and untrained_lang_emb and 'langs' in chkpoint_dict:
+            for lang in self.dicts['langs']:
+
+                untrained_id = self.dicts['langs'][lang]
+                if lang in chkpoint_dict['langs']:
+                    pretrained_id = chkpoint_dict['langs'][lang]
+                    untrained_lang_emb.weight.data[untrained_id].copy_(pretrained_lang_emb.weight.data[pretrained_id])
+
+        self.model.decoder.language_embeddings = untrained_lang_emb
+
     def _get_grads(self):
         grads = []
         for name, p in self.model.named_parameters():
@@ -74,7 +159,8 @@ class BaseTrainer(object):
             if p.grad is None:
                 raise RuntimeError('Model parameter did not receive gradient: ' + name + '. '
                                                                                          'Use the param in the forward pass or set requires_grad=False.' +
-                                   ' If you are using Stochastic model + fp16 - try to increase the number of minibatches' +
+                                   ' If you are using Stochastic model + fp16 - '
+                                   'try to increase the number of minibatches' +
                                    ' each update to avoid uninitialized gradients.')
             grads.append(p.grad.data)
         return grads
@@ -83,7 +169,8 @@ class BaseTrainer(object):
         grads = self._get_grads()
         if out is None:
             grads_size = sum(g.numel() for g in grads)
-            out = grads[0].new(grads_size).zero_()
+            out = grads[0].new(
+                grads_size).zero_()
         offset = 0
         for g in grads:
             numel = g.numel()
@@ -91,11 +178,127 @@ class BaseTrainer(object):
             offset += numel
         return out[:offset]
 
+    def warm_up(self):
+        """
+        Warmup the memory allocator, by attempting to fit the largest batch
+        :return:
+        """
+        if self.opt.memory_profiling:
+            from pytorch_memlab import MemReporter
+            reporter = MemReporter()
+
+        batch = self.train_data[0].get_largest_batch() if isinstance(self.train_data, list) \
+            else self.train_data.get_largest_batch()
+        opt = self.opt
+
+        if self.cuda:
+            batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
+
+        self.model.train()
+        self.model.zero_grad()
+        oom = False
+
+        if self.opt.memory_profiling:
+            print("Input size: ")
+            print(batch.size, batch.src_size, batch.tgt_size)
+
+        if opt.streaming:
+            streaming_state = self.model.init_stream()
+        else:
+            streaming_state = None
+
+        try:
+            targets = batch.get('target_output')
+            tgt_mask = None
+            outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                 zero_encoder=opt.zero_encoder,
+                                 mirror=opt.mirror_loss, streaming_state=streaming_state)
+
+            outputs['tgt_mask'] = tgt_mask
+
+            loss_dict = self.loss_function(outputs, targets, model=self.model, vocab_mask=batch.vocab_mask)
+            loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
+            full_loss = loss
+
+            if opt.mirror_loss:
+                rev_loss = loss_dict['rev_loss']
+                mirror_loss = loss_dict['mirror_loss']
+                full_loss = full_loss + rev_loss + mirror_loss
+
+            # reconstruction loss
+            # if opt.reconstruct:
+            #     rec_loss = loss_dict['rec_loss']
+            #     rec_loss = rec_loss
+            #     full_loss = full_loss + rec_loss
+            #
+            # if opt.lfv_multilingual:
+            #     lid_logits = outputs['lid_logits']
+            #     lid_labels = batch.get('target_lang')
+            #     lid_loss_function = self.loss_function.get_loss_function('lid_loss')
+            #     lid_loss = lid_loss_function(lid_logits, lid_labels)
+            #     full_loss = full_loss + lid_loss
+
+            optimizer = self.optim.optimizer
+
+            if self.opt.memory_profiling:
+                reporter.report(verbose=True)
+
+                # for obj in gc.get_objects():
+                #     try:
+                #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                #             # print(varname(obj))
+                #             # we can rule out parameter cost later
+                #             # if 'parameter' not in type(obj):
+                #             # if len(obj.shape) == 3:
+                #             # if not isinstance(obj, torch.nn.parameter.Parameter):
+                #             #     tensor = obj
+                #             #     numel = tensor.
+                #             print(type(obj), obj.type(), obj.size())
+                #     except:
+                #         pass
+
+                # print("Memory profiling complete.")
+                # print(torch.cuda.memory_summary())
+                # exit()
+
+            if self.cuda:
+                with amp.scale_loss(full_loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.div_(batch.tgt_size).backward()
+
+            if self.opt.memory_profiling:
+                print('========= after backward =========')
+                reporter.report(verbose=True)
+
+            self.model.zero_grad()
+            self.optim.zero_grad()
+            # self.optim.step()
+            # self.optim.reset()
+
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                oom = True
+            else:
+                raise e
+
+        if oom:
+            print("* Warning: out-of-memory in warming up. This is due to the largest batch is too big for the GPU.")
+        else:
+            print("* Warming up successuflly.")
+
+        if self.opt.memory_profiling:
+            if hasattr(torch.cuda, 'memory_summary'):
+                print(torch.cuda.memory_summary())
+            exit()
+
 
 class XETrainer(BaseTrainer):
 
     def __init__(self, model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer=True):
         super().__init__(model, loss_function, train_data, valid_data, dicts, opt)
+
+        self.n_gpus = len(self.opt.gpus)
 
         if self.cuda:
             torch.cuda.set_device(self.opt.gpus[0])
@@ -133,7 +336,7 @@ class XETrainer(BaseTrainer):
                 self.valid_data.src_align_right = True
                 self.valid_data.tgt_align_right = False
 
-    def save(self, epoch, valid_ppl, batch_order=None, iteration=-1):
+    def save(self, epoch, valid_ppl, itr=None):
 
         opt = self.opt
         model = self.model
@@ -142,17 +345,19 @@ class XETrainer(BaseTrainer):
         model_state_dict = self.model.state_dict()
         optim_state_dict = self.optim.state_dict()
 
+        if itr:
+            itr_state_dict = itr.state_dict()
+        else:
+            itr_state_dict = None
+
         #  drop a checkpoint
         checkpoint = {
             'model': model_state_dict,
             'dicts': dicts,
             'opt': opt,
             'epoch': epoch,
-            'iteration': iteration,
-            'batch_order': batch_order,
+            'itr': itr_state_dict,
             'optim': optim_state_dict,
-            'additional_batch_order': getattr(self, 'additional_batch_order', None),
-            'additional_data_iteration': getattr(self, 'additional_data_iteration', None),
             'amp': amp.state_dict()
         }
 
@@ -173,7 +378,7 @@ class XETrainer(BaseTrainer):
             print(" * Early stopping at epoch %s as best epoch was %s ." % (epoch, best_epoch))
             sys.exit(0)
 
-    def eval(self, data, report_classifier=False):
+    def eval(self, data, report_classifier=False, report_cm=False):
         total_loss = 0
         total_words = 0
         total_adv_loss = 0.0
@@ -182,7 +387,9 @@ class XETrainer(BaseTrainer):
             total_predict, correct_predict = 0.0, 0.0
             num_labels = self.model.generator[1].output_size
             res = torch.zeros(num_labels)
-            cm = torch.zeros([num_labels, num_labels], dtype=torch.long, device='cuda')
+
+            if report_cm:
+                cm = torch.zeros([num_labels, num_labels], dtype=torch.long, device='cpu')
 
         total_src_words = 0.0
         opt = self.opt
@@ -191,16 +398,30 @@ class XETrainer(BaseTrainer):
         self.model.eval()
         self.model.reset_states()
 
+        # the data iterator creates an epoch iterator
+        data_iterator = generate_data_iterator(data, seed=self.opt.seed,
+                                               num_workers=opt.num_workers, epoch=1, buffer_size=opt.buffer_size)
+        epoch_iterator = data_iterator.next_epoch_itr(False, pin_memory=False)
+
         if opt.streaming:
             streaming_state = self.model.init_stream()
         else:
             streaming_state = None
 
         """ PyTorch semantics: save space by not creating gradients """
-        with torch.no_grad():
-            for i in range(len(data)):
+        data_size = len(epoch_iterator)
+        i = 0
 
-                batch = data.next()[0]
+        with torch.no_grad():
+            # for i in range(len(data)):
+            while not data_iterator.end_of_epoch():
+                # batch = data.next()[0]
+                batch = next(epoch_iterator)
+                if isinstance(batch, list):
+                    batch = batch[0]
+                batch = rewrap(batch)
+
+                # batch = data.next()[0]
 
                 # if opt.streaming:
                 #     if data.is_new_stream():
@@ -235,73 +456,94 @@ class XETrainer(BaseTrainer):
                 total_src_words += batch.src_size
                 # adv loss
                 if opt.language_classifier and opt.language_classifier_tok:
-                    targets_src_lang = batch.get('targets_source_lang')
-                    classifier_loss_dict = self.loss_function(outputs, targets=targets_src_lang, model=self.model,
+                    if opt.token_classifier == 0:
+                        # predict language ID
+                        targets_classifier = batch.get('targets_source_lang')  # starts from 1
+                    elif opt.token_classifier == 1:
+                        # predict source token ID
+                        targets_classifier = batch.get('source')    # starts from 0, real tokens starts from 1
+                    elif opt.token_classifier == 2:
+                        # predict positional ID
+                        targets_classifier = batch.get('source_pos')
+                        targets_classifier[targets_classifier != 0] += 1    # start from 0
+                        targets_classifier[0, :] += 1
+                    elif opt.token_classifier == 3:
+                        # predict POS tag
+                        raise NotImplementedError
+
+                    classifier_loss_dict = self.loss_function(outputs, targets=targets_classifier, model=self.model,
                                                               lan_classifier=True,
                                                               reverse_landscape=False)
                     classifier_loss_data = classifier_loss_dict['data'] if classifier_loss_dict['data'] is not None else 0
                     total_adv_loss += classifier_loss_data
 
-                    # TODO: vectorize prediction accuracy here!
-                    logprobs_lan = outputs['logprobs_lan']
-                    # pad
-                    logprobs_lan = logprobs_lan.masked_fill(outputs['src_mask'].permute(2, 0, 1), onmt.constants.PAD).type_as(logprobs_lan)
-                    # pred = torch.exp(logprobs_lan)
-                    pred = logprobs_lan  # T, B, V
+                    if opt.token_classifier is not None and report_classifier:
+                        logprobs_lan = outputs['logprobs_lan']
+                        # pad
+                        logprobs_lan = logprobs_lan.masked_fill(outputs['src_mask'].permute(2, 0, 1), onmt.constants.PAD).type_as(logprobs_lan)
+                        # pred = torch.exp(logprobs_lan)
+                        pred = logprobs_lan  # T, B, V
+                        # unvectorized version of prediction accuracy
+                        # for sent_idx in range(pred.shape[1]):  # T, B, V, for each sentence in batch
+                        #     for pos_idx in range(pred.shape[0]):  # for each token
+                        #         if not torch.all(pred[pos_idx, sent_idx, :] == 0.0):
+                        #         # if not torch.all(pred[pos_idx, sent_idx, :] == 1.0):  # if not at padded positions.
+                        #         #     if torch.abs(1.0 - torch.sum(pred[pos_idx, sent_idx, :])) < 0.001:
+                        #             total_predict += 1.0
+                        #             pred_idx = torch.argmax(pred[pos_idx, sent_idx, :], dim=0)
+                        #
+                        #             if pred_idx == (targets_src_lang[pos_idx, sent_idx]-1):
+                        #                 correct_predict += 1.0
+                        #             res[pred_idx] += 1.0
+                        #             # print('predicted', pred_idx, 'target', targets_src_lang[pos_idx, sent_idx])
+                        #             # else:
+                        #             #     print(pred[pos_idx, sent_idx, :]
+                        # print('correct, total, acc.: ', corrsect_predict, total_predict, correct_predict / total_predict)
 
-                    # for sent_idx in range(pred.shape[1]):  # T, B, V, for each sentence in batch
-                    #     for pos_idx in range(pred.shape[0]):  # for each token
-                    #         if not torch.all(pred[pos_idx, sent_idx, :] == 0.0):
-                    #         # if not torch.all(pred[pos_idx, sent_idx, :] == 1.0):  # if not at padded positions.
-                    #         #     if torch.abs(1.0 - torch.sum(pred[pos_idx, sent_idx, :])) < 0.001:
-                    #             total_predict += 1.0
-                    #             pred_idx = torch.argmax(pred[pos_idx, sent_idx, :], dim=0)
-                    #
-                    #             if pred_idx == (targets_src_lang[pos_idx, sent_idx]-1):
-                    #                 correct_predict += 1.0
-                    #             res[pred_idx] += 1.0
-                    #             # print('predicted', pred_idx, 'target', targets_src_lang[pos_idx, sent_idx])
-                    #             # else:
-                    #             #     print(pred[pos_idx, sent_idx, :]
-                    # print('correct, total, acc.: ', correct_predict, total_predict, correct_predict / total_predict)
+                        pred_idx = torch.argmax(pred, dim=-1).cpu()  # T, B. starts from 0
+                        # padding not counted, since 0 - 1 would be -1
+                        correct_idx = (targets_classifier.cpu() - 1 == pred_idx)
 
-                    pred_idx = torch.argmax(pred, dim=-1)  # T, B. starts from 0
-                    correct_idx = (targets_src_lang-1 == pred_idx)   # padding not counted (target - 1 would be -1)
+                        correct_predict += correct_idx.sum()
+                        total_predict += (~outputs['src_mask']).sum()
 
-                    all_cnt = []
-                    for p in torch.arange(1, num_labels+1):
-                        cur_label_indx = targets_src_lang == p  # those position with this label
-                        pred_val, pred_cnt = torch.unique(pred_idx[cur_label_indx], return_counts=True)  #.to(dtype=torch.long, device='cuda')
-                        if pred_val.shape[0] < num_labels:  # not all labels have been predicted
-                            # if pred_val.shape != 0:
-                            pred_cnt_padded = torch.zeros(num_labels, dtype=torch.long, device=targets.device)
-                            pred_cnt_padded[pred_val] = pred_cnt
-                            pred_cnt = pred_cnt_padded
-                        elif pred_val.shape[0] > num_labels:
-                            raise ValueError('Some impossible label was predicted. Check your label esp. indexing.')
+                        if report_cm:
+                            all_cnt = []
+                            # # vectorized version of prediction accuracy
+                            if opt.token_classifier == 0:   # language label starts from 1
+                                label_range = torch.arange(1, num_labels + 1)
+                            else:
+                                label_range = torch.arange(num_labels)
 
-                        # print('true label ', p, pred_cnt, pred_cnt / float(pred_cnt.sum()))
-                        # pred_cnt = pred_cnt / pred_cnt.sum()
-                        all_cnt.append(pred_cnt)
+                            for p in label_range:
+                                cur_label_indx = (targets_classifier == p)  # those position with this label
+                                pred_val, pred_cnt = torch.unique(pred_idx[cur_label_indx], return_counts=True)  #.to(dtype=torch.long, device='cuda')
 
-                    res_per_row = torch.stack(all_cnt, dim=0)
-                    cm.index_add_(0, torch.arange(num_labels, device='cuda'), res_per_row)
+                                if pred_val.shape[0] < num_labels:  # not all labels have been predicted
+                                    # if pred_val.shape != 0:
+                                    pred_cnt_padded = torch.zeros(num_labels, dtype=torch.long, device='cpu')
+                                    pred_cnt_padded[pred_val] = pred_cnt
+                                    pred_cnt = pred_cnt_padded
+                                elif pred_val.shape[0] > num_labels:
+                                    raise ValueError('Some impossible label was predicted. Check your label esp. indexing.')
 
-                    correct_predict += correct_idx.sum()
-                    total_predict += (~outputs['src_mask']).sum()
-                    # print('correct, total: ', correct_predict, total_predict)
+                                all_cnt.append(pred_cnt)
 
-            if opt.language_classifier and opt.language_classifier_tok and report_classifier:
+                            res_per_row = torch.stack(all_cnt, dim=0)
+                            cm.index_add_(0, torch.arange(num_labels, device='cpu'), res_per_row)
+
+            if opt.token_classifier is not None and report_classifier:
                 print('Classifier accuracy', (correct_predict / total_predict).data.item())
-                # print(torch.diagonal(cm, 0).sum(), cm.sum(), torch.diagonal(cm, 0).sum().float() / cm.sum())
-                cm = torch.true_divide(cm, cm.sum(dim=1, keepdim=True))
-                print('Confusion matrix (row: true, col: pred):\n', cm.cpu().numpy())
+                if report_cm:
+                    cm = torch.true_divide(cm, cm.sum(dim=1, keepdim=True))
+                    print('Confusion matrix (row: true, col: pred):\n', cm.cpu().numpy())
 
         self.model.train()
         return total_loss / total_words, total_adv_loss / total_src_words
 
-    def train_epoch(self, epoch, resume=False, batch_order=None, iteration=0):
+    def train_epoch(self, epoch, resume=False, itr_progress=None):
 
+        global rec_ppl
         opt = self.opt
         train_data = self.train_data
         streaming = opt.streaming
@@ -311,13 +553,23 @@ class XETrainer(BaseTrainer):
         self.model.zero_grad()
         self.model.reset_states()
 
-        if resume:
-            train_data.batch_order = batch_order
-            train_data.set_index(iteration)
-            print("Resuming from iteration: %d" % iteration)
-        else:
-            batch_order = train_data.create_order()
-            iteration = 0
+        dataset = train_data
+
+        data_iterator = generate_data_iterator(dataset, seed=self.opt.seed, num_workers=opt.num_workers,
+                                               epoch=epoch, buffer_size=opt.buffer_size)
+
+        if resume:  # TODO: previously working with batch_order=None, iteration=0
+            data_iterator.load_state_dict(itr_progress)
+
+        epoch_iterator = data_iterator.next_epoch_itr(not streaming, pin_memory=opt.pin_memory)
+
+        # if resume:
+        #     train_data.batch_order = batch_order
+        #     train_data.set_index(iteration)
+        #     print("Resuming from iteration: %d" % iteration)
+        # else:
+        #     batch_order = train_data.create_order()
+        #     iteration = 0
 
         total_tokens, total_loss, total_words = 0, 0, 0
         total_non_pads = 0
@@ -340,228 +592,209 @@ class XETrainer(BaseTrainer):
         else:
             streaming_state = None
 
-        for i in range(iteration, n_samples):
+        i = data_iterator.iterations_in_epoch if not isinstance(train_data, list) else epoch_iterator.n_yielded
 
+        while not data_iterator.end_of_epoch():
             curriculum = (epoch < opt.curriculum)
 
-            batches = [train_data.next(curriculum=curriculum)[0]]
+            # this batch generator is not very clean atm
+            batch = next(epoch_iterator)
+            if isinstance(batch, list) and self.n_gpus == 1:
+                batch = batch[0]
+            batch = rewrap(batch)
 
-            if (len(self.additional_data) > 0 and
-                    i % self.additional_data_ratio[0] == 0):
-                for j in range(len(self.additional_data)):
-                    for k in range(self.additional_data_ratio[j + 1]):
-                        if self.additional_data_iteration[j] == len(self.additional_data[j]):
-                            self.additional_data_iteration[j] = 0
-                            self.additional_data[j].shuffle()
-                            self.additional_batch_order[j] = self.additional_data[j].create_order()
+            # batches = [train_data.next(curriculum=curriculum)[0]]
 
-                        batches.append(self.additional_data[j].next()[0])
-                        self.additional_data_iteration[j] += 1
+            # if (len(self.additional_data) > 0 and
+            #         i % self.additional_data_ratio[0] == 0):
+            #     for j in range(len(self.additional_data)):
+            #         for k in range(self.additional_data_ratio[j + 1]):
+            #             if self.additional_data_iteration[j] == len(self.additional_data[j]):
+            #                 self.additional_data_iteration[j] = 0
+            #                 self.additional_data[j].shuffle()
+            #                 self.additional_batch_order[j] = self.additional_data[j].create_order()
+            #
+            #             batches.append(self.additional_data[j].next()[0])
+            #             self.additional_data_iteration[j] += 1
 
-            for b in range(len(batches)):
-                batch = batches[b]
-                if self.cuda:
-                    batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
+            # for b in range(len(batches)):
+            #     batch = batches[b]
+            if self.cuda:
+                batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
 
-                # if opt.streaming:
-                #     if train_data.is_new_stream():
-                #         streaming_state = self.model.init_stream()
-                # else:
-                #     streaming_state = None
+            # if opt.streaming:
+            #     if train_data.is_new_stream():
+            #         streaming_state = self.model.init_stream()
+            # else:
+            #     streaming_state = None
 
-                oom = False
-                try:
-                    # outputs is a dictionary containing keys/values necessary for loss function
-                    # can be flexibly controlled within models for easier extensibility
-                    targets = batch.get('target_output')
-                    tgt_mask = targets.data.ne(onmt.constants.PAD)
+            oom = False
+            try:
+                # outputs is a dictionary containing keys/values necessary for loss function
+                # can be flexibly controlled within models for easier extensibility
+                targets = batch.get('target_output')
+                tgt_mask = targets.data.ne(onmt.constants.PAD)
 
-                    outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
-                                         zero_encoder=opt.zero_encoder,
-                                         mirror=opt.mirror_loss, streaming_state=streaming_state)
+                outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                     zero_encoder=opt.zero_encoder,
+                                     mirror=opt.mirror_loss, streaming_state=streaming_state)
 
-                    batch_size = batch.size
-                    #
-                    outputs['tgt_mask'] = tgt_mask
-                    #
-                    loss_dict = self.loss_function(outputs, targets, model=self.model)
-                    loss_data = loss_dict['data']
-                    loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
+                batch_size = batch.size
+                #
+                outputs['tgt_mask'] = tgt_mask
+                #
+                loss_dict = self.loss_function(outputs, targets, model=self.model)
+                loss_data = loss_dict['data']
+                loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
 
-                    optimizer = self.optim.optimizer
+                optimizer = self.optim.optimizer
 
-                    has_classifier_loss = self.opt.language_classifier and (not self.opt.freeze_language_classifier)
+                has_classifier_loss = self.opt.token_classifier is not None and not self.opt.freeze_language_classifier
 
-                    if not has_classifier_loss:
-                        # calculate gradient for enc / dec
-                        if self.cuda:
-                            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                                scaled_loss.backward()
-                        else:
-                            loss.backward()
-
+                if not has_classifier_loss:
+                    # calculate gradient for enc / dec
+                    if self.cuda:
+                        with amp.scale_loss(loss, optimizer) as scaled_loss:
+                            scaled_loss.backward()
                     else:
-                        if False: #(not optimize_classifier and not (self.opt.freeze_encoder and self.opt.freeze_decoder)): #or epoch<=8:
-                            # calculate gradient for enc / dec
-                            if self.cuda:
-                                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                                    scaled_loss.backward(retain_graph=True)
-                            else:
-                                loss.backward(retain_graph=True)
+                        loss.backward()
 
-                            # gradient from classifier
-                            if epoch > 8:
-                                # freeze classifier
-                                self.model.generator[1].requires_grad_(False)
-                                # unfreeze enc & dec
-                                self.model.encoder.requires_grad_(True)
-                                self.model.decoder.requires_grad_(True)
-                                # calc gradient for lan classifier
-                                targets_src_lang = batch.get('targets_source_lang')
-                                classifier_loss_dict = self.loss_function(outputs, targets=targets_src_lang,
-                                                                          model=self.model,
-                                                                          lan_classifier=True,
-                                                                          reverse_landscape=True)
-                                classifier_loss = classifier_loss_dict['loss'].div(
-                                    denom)  # a little trick to avoid gradient overflow with fp16
-                                classifier_loss_data_rev = classifier_loss_dict['data'] if classifier_loss_dict[
-                                                                                           'data'] is not None else 0
+                else:
+                    # freeze enc & dec
+                    self.model.encoder.requires_grad_(False)
+                    self.model.decoder.requires_grad_(False)
 
-                                # calc gradient for lan classifier
-                                if self.cuda:
-                                    with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
-                                        scaled_loss.backward(retain_graph=True)
-                                else:
-                                    classifier_loss.backward(retain_graph=True)
-                            else:
-                                classifier_loss_data, classifier_loss_data_rev = 0, 0
+                    if self.opt.token_classifier == 0:  # language ID
+                        targets_classifier = batch.get('targets_source_lang')
+                    elif self.opt.token_classifier == 1:     # predict source token ID
+                        targets_classifier = batch.get('source')
+                    elif self.opt.token_classifier == 2:     # predict positional ID
+                        targets_classifier = batch.get('source_pos')
+                        targets_classifier[targets_classifier != 0] += 1  # start from 0
+                        targets_classifier[0, :] += 1
+                    elif self.opt.token_classifier == 3:     # predict POS tag
+                        raise NotImplementedError
 
-                        else:  # odd number, freeze enc/dec, train other
-                            # unfreeze classifier
-                            self.model.generator[1].requires_grad_(True)
-                            # freeze enc & dec
-                            self.model.encoder.requires_grad_(False)
-                            self.model.decoder.requires_grad_(False)
-
-                            targets_src_lang = batch.get('targets_source_lang')
-                            classifier_loss_dict = self.loss_function(outputs, targets=targets_src_lang,
-                                                                      model=self.model,
-                                                                      lan_classifier=True,
-                                                                      reverse_landscape=False)
-                            classifier_loss = classifier_loss_dict['loss'].div(
-                                denom)  # a little trick to avoid gradient overflow with fp16
-                            classifier_loss_data = classifier_loss_dict['data'] if classifier_loss_dict[
-                                                                                   'data'] is not None else 0
-                            classifier_loss_data_rev = 0
-                            # calc gradient for lan classifier
-                            if self.cuda:
-                                with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
-                                    scaled_loss.backward()
-                            else:
-                                classifier_loss.backward()
-
-                except RuntimeError as e:
-                    if 'out of memory' in str(e):
-                        print('| WARNING: ran out of memory on GPU , skipping batch')
-                        oom = True
-                        torch.cuda.empty_cache()
-                        loss = 0
-                        if opt.streaming:  # reset stream in this case ...
-                            streaming_state = self.model.init_stream()
+                    classifier_loss_dict = self.loss_function(outputs, targets=targets_classifier,
+                                                              model=self.model,
+                                                              lan_classifier=True,
+                                                              reverse_landscape=False)
+                    classifier_loss = classifier_loss_dict['loss'].div(
+                        denom)  # a little trick to avoid gradient overflow with fp16
+                    classifier_loss_data = classifier_loss_dict['data'] if classifier_loss_dict[
+                                                                           'data'] is not None else 0
+                    classifier_loss_data_rev = 0
+                    # calc gradient for lan classifier
+                    if self.cuda:
+                        with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
+                            scaled_loss.backward()
                     else:
-                        raise e
+                        classifier_loss.backward()
 
-                if loss != loss:
-                    # catching NAN problem
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    print('| WARNING: ran out of memory on GPU , skipping batch')
                     oom = True
-                    self.model.zero_grad()
+                    torch.cuda.empty_cache()
+                    loss = 0
+                    if opt.streaming:  # reset stream in this case ...
+                        streaming_state = self.model.init_stream()
+                else:
+                    raise e
+
+            if loss != loss:
+                # catching NAN problem
+                oom = True
+                self.model.zero_grad()
+                self.optim.zero_grad()
+                num_accumulated_words = 0
+                num_accumulated_sents = 0
+
+            if not oom:
+                src_size = batch.src_size
+                tgt_size = batch.tgt_size
+
+                counter = counter + 1
+                num_accumulated_words += tgt_size
+                num_accumulated_sents += batch_size
+
+                #   We only update the parameters after getting gradients from n mini-batches
+                update_flag = False
+                if 0 < opt.batch_size_update <= num_accumulated_words:
+                    update_flag = True
+                elif counter >= opt.update_frequency and 0 >= opt.batch_size_update:
+                    update_flag = True
+                elif i == n_samples - 1:  # update for the last minibatch
+                    update_flag = True
+
+                if update_flag:
+                    grad_denom = 1 / denom
+                    if self.opt.normalize_gradient:
+                        grad_denom = num_accumulated_words / denom
+                    normalize_gradients(amp.master_params(optimizer), grad_denom)
+                    # Update the parameters.
+                    if self.opt.max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), self.opt.max_grad_norm)
+                    self.optim.step(grad_denom=grad_denom)
                     self.optim.zero_grad()
+                    self.model.zero_grad()
+                    counter = 0
                     num_accumulated_words = 0
                     num_accumulated_sents = 0
+                    num_updates = self.optim._step
 
-                if not oom:
-                    src_size = batch.src_size
-                    tgt_size = batch.tgt_size
+                    if opt.save_every > 0 and num_updates % opt.save_every == -1 % opt.save_every:
+                        valid_loss, _ = self.eval(self.valid_data, report_classifier=self.opt.token_classifier is not None)
+                        valid_ppl = math.exp(min(valid_loss, 100))
+                        print('Validation perplexity: %g' % valid_ppl)
 
-                    counter = counter + 1
-                    num_accumulated_words += tgt_size
-                    num_accumulated_sents += batch_size
+                        ep = float(epoch) - 1. + ((float(i) + 1.) / n_samples)
 
-                    #   We only update the parameters after getting gradients from n mini-batches
-                    update_flag = False
-                    if 0 < opt.batch_size_update <= num_accumulated_words:
-                        update_flag = True
-                    elif counter >= opt.update_frequency and 0 >= opt.batch_size_update:
-                        update_flag = True
-                    elif i == n_samples - 1:  # update for the last minibatch
-                        update_flag = True
+                        self.save(ep, valid_ppl, itr=data_iterator)
 
-                    if update_flag:
-                        grad_denom = 1 / denom
-                        if self.opt.normalize_gradient:
-                            grad_denom = num_accumulated_words / denom
-                        normalize_gradients(amp.master_params(optimizer), grad_denom)
-                        # Update the parameters.
-                        if self.opt.max_grad_norm > 0:
-                            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), self.opt.max_grad_norm)
-                        self.optim.step(grad_denom=grad_denom)
-                        self.optim.zero_grad()
-                        self.model.zero_grad()
-                        counter = 0
-                        num_accumulated_words = 0
-                        num_accumulated_sents = 0
-                        num_updates = self.optim._step
+                    update_counter += 1
 
-                        if opt.save_every > 0 and num_updates % opt.save_every == -1 % opt.save_every:
-                            valid_loss, _ = self.eval(self.valid_data)
-                            valid_ppl = math.exp(min(valid_loss, 100))
-                            print('Validation perplexity: %g' % valid_ppl)
+                # if (optimize_classifier and update_counter >= 200) or (not optimize_classifier and update_counter >=10):
+                #     print('============optimize_classifier <--', optimize_classifier)
+                #     optimize_classifier = not optimize_classifier
+                #     update_counter = 0
+                #     valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True)
+                #     valid_ppl = math.exp(min(valid_loss, 100))
+                #     print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
+                #     print('============optimize_classifier -->', optimize_classifier)
 
-                            ep = float(epoch) - 1. + ((float(i) + 1.) / n_samples)
+                num_words = tgt_size
+                report_loss += loss_data
+                report_classifier_loss += classifier_loss_data if self.opt.language_classifier else 0
+                report_classifier_loss_rev += classifier_loss_data_rev if self.opt.language_classifier else 0
+                report_tgt_words += num_words
+                report_src_words += src_size
+                total_loss += loss_data
+                total_words += num_words
+                total_tokens += batch.get('target_output').nelement()
+                total_non_pads += batch.get('target_output').ne(onmt.constants.PAD).sum().item()
+                optim = self.optim
+                batch_efficiency = total_non_pads / total_tokens
 
-                            self.save(ep, valid_ppl, batch_order=batch_order, iteration=i)
+                if i == 0 or (i % opt.log_interval == -1 % opt.log_interval):
+                    print(("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; classifier loss: %6.2f ; classifier rev loss: %6.2f ; lr: %.7f ; num updates: %7d " +
+                           "%5.0f src tok/s; %5.0f tgt tok/s; %s elapsed") %
+                          (epoch, i + 1, len(data_iterator),
+                           math.exp(report_loss / report_tgt_words),
+                           report_classifier_loss / float(report_src_words),
+                           report_classifier_loss_rev / float(report_src_words),
+                           optim.getLearningRate(),
+                           optim._step,
+                           report_src_words / (time.time() - start),
+                           report_tgt_words / (time.time() - start),
+                           str(datetime.timedelta(seconds=int(time.time() - self.start_time)))))
 
-                        update_counter += 1
+                    report_loss, report_tgt_words = 0, 0
+                    report_classifier_loss = 0.0
+                    report_src_words = 0
+                    start = time.time()
 
-                    # if (optimize_classifier and update_counter >= 200) or (not optimize_classifier and update_counter >=10):
-                    #     print('============optimize_classifier <--', optimize_classifier)
-                    #     optimize_classifier = not optimize_classifier
-                    #     update_counter = 0
-                    #     valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True)
-                    #     valid_ppl = math.exp(min(valid_loss, 100))
-                    #     print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
-                    #     print('============optimize_classifier -->', optimize_classifier)
-
-                    num_words = tgt_size
-                    report_loss += loss_data
-                    report_classifier_loss += classifier_loss_data if self.opt.language_classifier else 0
-                    report_classifier_loss_rev += classifier_loss_data_rev if self.opt.language_classifier else 0
-                    report_tgt_words += num_words
-                    report_src_words += src_size
-                    total_loss += loss_data
-                    total_words += num_words
-                    total_tokens += batch.get('target_output').nelement()
-                    total_non_pads += batch.get('target_output').ne(onmt.constants.PAD).sum().item()
-                    optim = self.optim
-                    batch_efficiency = total_non_pads / total_tokens
-
-                    if b == 0 and (i == 0 or (i % opt.log_interval == -1 % opt.log_interval)):
-                        print(("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; adv loss: %6.2f ; adv rev loss: %6.2f ; lr: %.7f ; num updates: %7d " +
-                               "%5.0f src tok/s; %5.0f tgt tok/s; %s elapsed") %
-                              (epoch, i + 1, len(train_data),
-                               math.exp(report_loss / report_tgt_words),
-                               report_classifier_loss / float(report_src_words),
-                               report_classifier_loss_rev / float(report_src_words), #math.log(max(0.000001, report_classifier_loss)) - math.log(report_src_words)),
-                               optim.getLearningRate(),
-                               optim._step,
-                               report_src_words / (time.time() - start),
-                               report_tgt_words / (time.time() - start),
-                               str(datetime.timedelta(seconds=int(time.time() - self.start_time)))))
-
-                        report_loss, report_tgt_words = 0, 0
-                        report_classifier_loss = 0.0
-                        report_src_words = 0
-                        start = time.time()
+                i = i + 1
 
         return total_loss / total_words
 
@@ -572,62 +805,63 @@ class XETrainer(BaseTrainer):
         model = self.model
         optim = self.optim
 
-        # Try to load the save_file
-        # checkpoint = None
-        # if save_file:
-        #     checkpoint = torch.load(save_file, map_location=lambda storage, loc: storage)
-
         if checkpoint is not None:
             self.model.load_state_dict(checkpoint['model'])
-            prev_opt = checkpoint['opt'] if 'opt' in checkpoint else None
+            prec_opt = checkpoint['opt'] if 'opt' in checkpoint else None
 
             if not opt.reset_optim:
+                print("* Loading optimizer states ... ")
                 self.optim.load_state_dict(checkpoint['optim'])
-                if prev_opt is not None and hasattr(prev_opt, "fp16_mixed"):
+                if prec_opt is not None and hasattr(prec_opt, "fp16_mixed"):
                     # Only load amp information if the mode is the same
                     # Maybe its better to change between optimization mode?
-                    if opt.fp16_mixed == prev_opt.fp16_mixed and opt.fp16 == prev_opt.fp16:
+                    if opt.fp16_mixed == prec_opt.fp16_mixed and opt.fp16 == prec_opt.fp16:
                         if 'amp' in checkpoint:
                             amp.load_state_dict(checkpoint['amp'])
 
-                if 'batch_order' in checkpoint:
-                    batch_order = checkpoint['batch_order']
-                    iteration = checkpoint['iteration'] + 1
+                # Only load the progress when we use the same optimizer
+                if 'itr' in checkpoint:
+                    itr_progress = checkpoint['itr']
                 else:
-                    batch_order = None
-                    iteration = 0
-                opt.start_epoch = int(math.floor(float(checkpoint['epoch'] + 1)))
+                    itr_progress = None
 
                 resume = True
-                if len(self.additional_data) > 0:
-                    if 'additional_batch_order' in checkpoint:
-                        self.additional_batch_order = checkpoint['additional_batch_order']
-                        self.additional_data_iteration = checkpoint['additional_data_iteration']
-                    else:
-                        self.init_additional_data()
+                start_epoch = checkpoint['epoch'] if 'epoch' in checkpoint else 1
+                if start_epoch is None:
+                    start_epoch = 1
+
             else:
-                batch_order = None
-                iteration = 0
+                itr_progress = None
                 resume = False
-                self.init_additional_data()
+                start_epoch = 1
 
             del checkpoint['model']
             del checkpoint['optim']
             del checkpoint
         else:
-            batch_order = None
-            iteration = 0
+            itr_progress = None
             print('Initializing model parameters')
             init_model_parameters(model, opt)
             resume = False
-            self.init_additional_data()
+            start_epoch = 1
 
         if opt.load_encoder_from:
             self.load_encoder_weight(opt.load_encoder_from)
 
-        valid_loss, valid_adv_loss = self.eval(self.valid_data)
+        # if opt.load_decoder_from:
+        #     self.load_decoder_weight(opt.load_decoder_from)
+
+        valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=opt.token_classifier is not None)
         valid_ppl = math.exp(min(valid_loss, 100))
-        print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
+        print('Validation perplexity: %g, classifier loss: %6.6f' % (valid_ppl, valid_adv_loss))
+
+        # if we are on a GPU: warm up the memory allocator
+        if self.cuda:
+            self.warm_up()
+
+            valid_loss, _ = self.eval(self.valid_data)
+            valid_ppl = math.exp(min(valid_loss, 100))
+            print('Validation perplexity: %g' % valid_ppl)
 
         self.start_time = time.time()
 
@@ -635,28 +869,292 @@ class XETrainer(BaseTrainer):
             print('')
 
             #  (1) train for one epoch on the training set
-            train_loss = self.train_epoch(epoch, resume=resume,
-                                          batch_order=batch_order,
-                                          iteration=iteration)
+            train_loss = self.train_epoch(epoch, resume=resume, itr_progress=itr_progress)
             train_ppl = math.exp(min(train_loss, 100))
             print('Train perplexity: %g' % train_ppl)
 
             #  (2) evaluate on the validation set
-            valid_loss, valid_adv_loss = self.eval(self.valid_data)
+            valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=opt.token_classifier is not None)
             valid_ppl = math.exp(min(valid_loss, 100))
             print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
 
             self.save(epoch, valid_ppl)
-            batch_order = None
-            iteration = None
+            itr_progress = None
             resume = False
 
-    def init_additional_data(self):
-        self.additional_batch_order = []
-        self.additional_data_iteration = []
-        for i in range(len(self.additional_data)):
-            self.additional_data_iteration.append(0)
-            self.additional_data[i].shuffle()
-            self.additional_batch_order.append(self.additional_data[i].create_order())
-
-
+# class XEAdversarialTrainer(XETrainer):
+#
+#     def __init__(self, model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer=True):
+#         super().__init__(self, model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer)
+#
+#     def train_epoch(self, epoch, resume=False, itr_progress=None):
+#
+#         opt = self.opt
+#         train_data = self.train_data
+#         streaming = opt.streaming
+#
+#         self.model.train()
+#         self.loss_function.train()
+#         # Clear the gradients of the model
+#         # self.runner.zero_grad()
+#         self.model.zero_grad()
+#         self.model.reset_states()
+#
+#         dataset = train_data
+#
+#         # data iterator: object that controls the
+#         # data_iterator = DataIterator(dataset, dataset.collater, dataset.batches, seed=self.opt.seed,
+#         #                              num_workers=opt.num_workers, epoch=epoch, buffer_size=opt.buffer_size)
+#         data_iterator = generate_data_iterator(dataset, seed=self.opt.seed, num_workers=opt.num_workers,
+#                                                epoch=epoch, buffer_size=opt.buffer_size)
+#
+#         if resume:
+#             data_iterator.load_state_dict(itr_progress)
+#
+#         epoch_iterator = data_iterator.next_epoch_itr(not streaming, pin_memory=opt.pin_memory)
+#
+#         total_tokens, total_loss, total_words = 0, 0, 0
+#         total_non_pads = 0
+#         report_loss, report_tgt_words = 0, 0
+#         report_classifier_loss, report_classifier_loss_rev = 0.0, 0.0
+#         optimize_classifier = True
+#         report_src_words = 0
+#         start = time.time()
+#         n_samples = len(train_data)
+#
+#         counter = 0
+#         update_counter = 0
+#         num_accumulated_words = 0
+#         num_accumulated_sents = 0
+#         denom = 3584
+#         nan = False
+#
+#         if opt.streaming:
+#             streaming_state = self.model.init_stream()
+#         else:
+#             streaming_state = None
+#
+#         for i in range(iteration, n_samples):
+#
+#             curriculum = (epoch < opt.curriculum)
+#
+#             batches = [train_data.next(curriculum=curriculum)[0]]
+#
+#             if (len(self.additional_data) > 0 and
+#                     i % self.additional_data_ratio[0] == 0):
+#                 for j in range(len(self.additional_data)):
+#                     for k in range(self.additional_data_ratio[j + 1]):
+#                         if self.additional_data_iteration[j] == len(self.additional_data[j]):
+#                             self.additional_data_iteration[j] = 0
+#                             self.additional_data[j].shuffle()
+#                             self.additional_batch_order[j] = self.additional_data[j].create_order()
+#
+#                         batches.append(self.additional_data[j].next()[0])
+#                         self.additional_data_iteration[j] += 1
+#
+#             for b in range(len(batches)):
+#                 batch = batches[b]
+#                 if self.cuda:
+#                     batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
+#
+#                 # if opt.streaming:
+#                 #     if train_data.is_new_stream():
+#                 #         streaming_state = self.model.init_stream()
+#                 # else:
+#                 #     streaming_state = None
+#
+#                 oom = False
+#                 try:
+#                     # outputs is a dictionary containing keys/values necessary for loss function
+#                     # can be flexibly controlled within models for easier extensibility
+#                     targets = batch.get('target_output')
+#                     tgt_mask = targets.data.ne(onmt.constants.PAD)
+#
+#                     outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+#                                          zero_encoder=opt.zero_encoder,
+#                                          mirror=opt.mirror_loss, streaming_state=streaming_state)
+#
+#                     batch_size = batch.size
+#                     #
+#                     outputs['tgt_mask'] = tgt_mask
+#                     #
+#                     loss_dict = self.loss_function(outputs, targets, model=self.model)
+#                     loss_data = loss_dict['data']
+#                     loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
+#
+#                     optimizer = self.optim.optimizer
+#
+#                     has_classifier_loss = self.opt.language_classifier and (not self.opt.freeze_language_classifier)
+#
+#                     if not has_classifier_loss:
+#                         # calculate gradient for enc / dec
+#                         if self.cuda:
+#                             with amp.scale_loss(loss, optimizer) as scaled_loss:
+#                                 scaled_loss.backward()
+#                         else:
+#                             loss.backward()
+#
+#                     else:
+#                         if (not optimize_classifier and not (self.opt.freeze_encoder and self.opt.freeze_decoder)): #or epoch<=8:
+#                             # calculate gradient for enc / dec
+#                             if self.cuda:
+#                                 with amp.scale_loss(loss, optimizer) as scaled_loss:
+#                                     scaled_loss.backward(retain_graph=True)
+#                             else:
+#                                 loss.backward(retain_graph=True)
+#
+#                             # gradient from classifier
+#                             if epoch > 8:
+#                                 # freeze classifier
+#                                 self.model.generator[1].requires_grad_(False)
+#                                 # unfreeze enc & dec
+#                                 self.model.encoder.requires_grad_(True)
+#                                 self.model.decoder.requires_grad_(True)
+#                                 # calc gradient for lan classifier
+#                                 targets_src_lang = batch.get('targets_source_lang')
+#                                 classifier_loss_dict = self.loss_function(outputs, targets=targets_src_lang,
+#                                                                           model=self.model,
+#                                                                           lan_classifier=True,
+#                                                                           reverse_landscape=True)
+#                                 classifier_loss = classifier_loss_dict['loss'].div(
+#                                     denom)  # a little trick to avoid gradient overflow with fp16
+#                                 classifier_loss_data_rev = classifier_loss_dict['data'] if classifier_loss_dict[
+#                                                                                            'data'] is not None else 0
+#
+#                                 # calc gradient for lan classifier
+#                                 if self.cuda:
+#                                     with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
+#                                         scaled_loss.backward(retain_graph=True)
+#                                 else:
+#                                     classifier_loss.backward(retain_graph=True)
+#                             else:
+#                                 classifier_loss_data, classifier_loss_data_rev = 0, 0
+#
+#                         else:  # odd number, freeze enc/dec, train other
+#                             # unfreeze classifier
+#                             self.model.generator[1].requires_grad_(True)
+#                             # freeze enc & dec
+#                             self.model.encoder.requires_grad_(False)
+#                             self.model.decoder.requires_grad_(False)
+#
+#                             targets_src_lang = batch.get('targets_source_lang')
+#                             classifier_loss_dict = self.loss_function(outputs, targets=targets_src_lang,
+#                                                                       model=self.model,
+#                                                                       lan_classifier=True,
+#                                                                       reverse_landscape=False)
+#                             classifier_loss = classifier_loss_dict['loss'].div(
+#                                 denom)  # a little trick to avoid gradient overflow with fp16
+#                             classifier_loss_data = classifier_loss_dict['data'] if classifier_loss_dict[
+#                                                                                    'data'] is not None else 0
+#                             classifier_loss_data_rev = 0
+#                             # calc gradient for lan classifier
+#                             if self.cuda:
+#                                 with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
+#                                     scaled_loss.backward()
+#                             else:
+#                                 classifier_loss.backward()
+#
+#                 except RuntimeError as e:
+#                     if 'out of memory' in str(e):
+#                         print('| WARNING: ran out of memory on GPU , skipping batch')
+#                         oom = True
+#                         torch.cuda.empty_cache()
+#                         loss = 0
+#                         if opt.streaming:  # reset stream in this case ...
+#                             streaming_state = self.model.init_stream()
+#                     else:
+#                         raise e
+#
+#                 if loss != loss:
+#                     # catching NAN problem
+#                     oom = True
+#                     self.model.zero_grad()
+#                     self.optim.zero_grad()
+#                     num_accumulated_words = 0
+#                     num_accumulated_sents = 0
+#
+#                 if not oom:
+#                     src_size = batch.src_size
+#                     tgt_size = batch.tgt_size
+#
+#                     counter = counter + 1
+#                     num_accumulated_words += tgt_size
+#                     num_accumulated_sents += batch_size
+#
+#                     #   We only update the parameters after getting gradients from n mini-batches
+#                     update_flag = False
+#                     if 0 < opt.batch_size_update <= num_accumulated_words:
+#                         update_flag = True
+#                     elif counter >= opt.update_frequency and 0 >= opt.batch_size_update:
+#                         update_flag = True
+#                     elif i == n_samples - 1:  # update for the last minibatch
+#                         update_flag = True
+#
+#                     if update_flag:
+#                         grad_denom = 1 / denom
+#                         if self.opt.normalize_gradient:
+#                             grad_denom = num_accumulated_words / denom
+#                         normalize_gradients(amp.master_params(optimizer), grad_denom)
+#                         # Update the parameters.
+#                         if self.opt.max_grad_norm > 0:
+#                             torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), self.opt.max_grad_norm)
+#                         self.optim.step(grad_denom=grad_denom)
+#                         self.optim.zero_grad()
+#                         self.model.zero_grad()
+#                         counter = 0
+#                         num_accumulated_words = 0
+#                         num_accumulated_sents = 0
+#                         num_updates = self.optim._step
+#
+#                         if opt.save_every > 0 and num_updates % opt.save_every == -1 % opt.save_every:
+#                             valid_loss, _ = self.eval(self.valid_data)
+#                             valid_ppl = math.exp(min(valid_loss, 100))
+#                             print('Validation perplexity: %g' % valid_ppl)
+#
+#                             ep = float(epoch) - 1. + ((float(i) + 1.) / n_samples)
+#
+#                             self.save(ep, valid_ppl, itr=data_iterator)
+#
+#                         update_counter += 1
+#
+#                     # if (optimize_classifier and update_counter >= 200) or (not optimize_classifier and update_counter >=10):
+#                     #     print('============optimize_classifier <--', optimize_classifier)
+#                     #     optimize_classifier = not optimize_classifier
+#                     #     update_counter = 0
+#                     #     valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True)
+#                     #     valid_ppl = math.exp(min(valid_loss, 100))
+#                     #     print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
+#                     #     print('============optimize_classifier -->', optimize_classifier)
+#
+#                     num_words = tgt_size
+#                     report_loss += loss_data
+#                     report_classifier_loss += classifier_loss_data if self.opt.language_classifier else 0
+#                     report_classifier_loss_rev += classifier_loss_data_rev if self.opt.language_classifier else 0
+#                     report_tgt_words += num_words
+#                     report_src_words += src_size
+#                     total_loss += loss_data
+#                     total_words += num_words
+#                     total_tokens += batch.get('target_output').nelement()
+#                     total_non_pads += batch.get('target_output').ne(onmt.constants.PAD).sum().item()
+#                     optim = self.optim
+#                     batch_efficiency = total_non_pads / total_tokens
+#
+#                     if b == 0 and (i == 0 or (i % opt.log_interval == -1 % opt.log_interval)):
+#                         print(("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; adv loss: %6.2f ; adv rev loss: %6.2f ; lr: %.7f ; num updates: %7d " +
+#                                "%5.0f src tok/s; %5.0f tgt tok/s; %s elapsed") %
+#                               (epoch, i + 1, len(train_data),
+#                                math.exp(report_loss / report_tgt_words),
+#                                report_classifier_loss / float(report_src_words),
+#                                report_classifier_loss_rev / float(report_src_words), #math.log(max(0.000001, report_classifier_loss)) - math.log(report_src_words)),
+#                                optim.getLearningRate(),
+#                                optim._step,
+#                                report_src_words / (time.time() - start),
+#                                report_tgt_words / (time.time() - start),
+#                                str(datetime.timedelta(seconds=int(time.time() - self.start_time)))))
+#
+#                         report_loss, report_tgt_words = 0, 0
+#                         report_classifier_loss = 0.0
+#                         report_src_words = 0
+#                         start = time.time()
+#
+#         return total_loss / total_words

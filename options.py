@@ -17,6 +17,14 @@ def make_parser(parser):
                         help='Pad vocab so that the size divides by this multiplier')
     parser.add_argument('-src_align_right', action="store_true",
                         help="""Aligning the source sentences to the right (default=left for Transformer)""")
+    parser.add_argument('-buffer_size', type=int, default=16,
+                        help='The iterator fills the data buffer with this size')
+    parser.add_argument('-num_workers', type=int, default=0,
+                        help='Number of extra workers for data fetching. 0=uses the main process.')
+    parser.add_argument('-pin_memory', action="store_true",
+                        help='The data loader pins memory into the GPU to reduce the bottleneck between GPU-CPU')
+    parser.add_argument('-memory_profiling', action="store_true",
+                        help='Analyze memory consumption for the model')
     # MODEL UTIL
     parser.add_argument('-save_model', default='model',
                         help="""Model filename (the model will be saved as
@@ -277,8 +285,14 @@ def make_parser(parser):
     parser.add_argument('-language_classifer_mid_layer_size', type=int, default=0,
                         help='If > 0, add aother FC layer for language classifier of this size.')
 
+    parser.add_argument('-token_classifier_at', type=int, default=None,
+                        help='Where to do token-level classification. 1 (1st)|-1 (last)|0 (all)|None')
+    parser.add_argument('-token_classifier', type=int, default=None,
+                        help='Whether to use a token classifier on top of encoder states. '
+                             '1: classify vocabulary ID, 2: classify position ID, 3: classify positional encoding')
+
     parser.add_argument('-num_classifier_languages', type=int, default=2,
-                        help='NUmber of languages to classify.')
+                        help='Number of languages to classify.')
     parser.add_argument('-gradient_scale', type=float, default=1.0,
                         help='Scale for flipped gradient')
 
@@ -415,6 +429,12 @@ def backward_compatible(opt):
     if not hasattr(opt, 'num_classifier_languages'):
         opt.num_classifier_languages = 2
 
+    if not hasattr(opt, 'token_classifier'):
+        opt.token_classifier = None
+
+    if not hasattr(opt, 'token_classifier_at'):
+        opt.token_classifier_at = None
+
     if not hasattr(opt, 'gradient_scale'):
         opt.gradient_scale = 1.0
 
@@ -441,5 +461,14 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'save_classifier_activation'):
         opt.save_classifier_activation = False
+
+    if not hasattr(opt, 'buffer_size'):
+        opt.buffer_size = 16
+
+    if not hasattr(opt, 'num_workers'):
+        opt.num_workers = 0
+
+    if not hasattr(opt, 'nce'):
+        opt.nce = 0
 
     return opt

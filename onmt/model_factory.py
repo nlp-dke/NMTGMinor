@@ -48,10 +48,37 @@ def build_tm_model(opt, dicts):
                                                           fix_norm=opt.fix_norm_output_embedding)]
 
     if opt.language_classifier:
+        mid_layer_size = opt.language_classifer_mid_layer_size
+
+        if opt.token_classifier is not None:
+            if opt.token_classifier == 0:
+                # predict source language ID
+                output_size = opt.num_classifier_languages
+            elif opt.token_classifier == 1:
+                # predict source token ID
+                output_size = len(dicts['src'].idxToLabel)
+            elif opt.token_classifier == 2:
+                # predict positional ID
+                output_size = opt.max_position_length
+            elif opt.token_classifier == 3:
+                # predict POS tag
+                raise NotImplementedError
+            else:
+                raise NotImplementedError
+        else:
+            output_size = opt.num_classifier_languages
+            opt.token_classifier = 0
+
+        if opt.token_classifier_at is not None and opt.token_classifier_at != -1:
+            classifier_input_name = 'mid_layer_output'  # specified encoder layer
+        else:
+            classifier_input_name = 'context'   # encoder output
+
         generators.append(onmt.modules.base_seq2seq.Classifier(hidden_size=opt.model_size,
-                                                               output_size=opt.num_classifier_languages,  # padding is 0
+                                                               output_size=output_size,  # padding is 0
                                                                fix_norm=False, grad_scale=opt.gradient_scale,
-                                                               mid_layer_size=opt.language_classifer_mid_layer_size))
+                                                               mid_layer_size=mid_layer_size,
+                                                               input_name=classifier_input_name))
 
     # BUILD EMBEDDINGS
     if 'src' in dicts:

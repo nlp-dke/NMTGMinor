@@ -49,7 +49,10 @@ class CrossEntropyLossBase(_Loss):
         # no label smoothing
         # Note: language ID starts from 1
         if not reverse_landscape:
-            gtruth = targets.view(-1)  # 1D, (batch X time).
+            try:
+                gtruth = targets.view(-1)  # 1D, (batch X time).
+            except RuntimeError:
+                gtruth = targets.contiguous().view(-1)
             scores = scores.view(-1, scores.size(-1))  # 2D, batch * (time X vocab_size)
             lprobs = scores
             non_pad_mask = gtruth.ne(self.padding_idx)
@@ -57,7 +60,7 @@ class CrossEntropyLossBase(_Loss):
             nll_loss = nll_loss.sum()
             loss = nll_loss
         else:
-            gtruth = targets.view(-1)  # 1D, (batch X time). # -1 due to language ID from 1
+            gtruth = targets.view(-1)  # 1D, (batch X time).
             scores = scores.view(-1, scores.size(-1))  # 2D, batch * (time X vocab_size)
             lprobs = scores
             non_pad_mask = gtruth.ne(self.padding_idx)

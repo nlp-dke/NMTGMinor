@@ -76,8 +76,8 @@ class NMTModel(nn.Module):
                     return False
             if param_name == 'decoder.mask':
                 return False
-            # if 'generator.1' in param_name: #TODO: need to when training classifier
-            #     return Falses
+            # if 'generator.1' in param_name:  #TODO: need to when training classifier
+            #     return False
             return True
 
         # restore old generated if necessary for loading
@@ -88,7 +88,7 @@ class NMTModel(nn.Module):
         # pad word LUT related dimensions
         for key in ['encoder.word_lut.weight', 'decoder.word_lut.weight',
                     'generator.0.linear.weight', 'generator.0.linear.bias',
-                    'encoder.language_embedding.weight', 'decoder.language_embeddings.weight']:  # TODO: add language LUT weight
+                    'encoder.language_embedding.weight', 'decoder.language_embeddings.weight']:
             if key in state_dict:  # in incoming state dict
                 print("*** expanding/shrinking {0} from {1} to {2}".format(key, state_dict[key].shape, model_dict[key].shape))
                 print("*** norm old:", state_dict[key].mean(0).norm(), "norm new:", model_dict[key].mean(0).norm())
@@ -150,7 +150,7 @@ class DecoderState(object):
 
 class Classifier(nn.Module):
 
-    def __init__(self, hidden_size, output_size, fix_norm=False, grad_scale=1.0, mid_layer_size=0):
+    def __init__(self, hidden_size, output_size, fix_norm=False, grad_scale=1.0, mid_layer_size=0, input_name='context'):
 
         super(Classifier, self).__init__()
 
@@ -178,11 +178,12 @@ class Classifier(nn.Module):
 
         self.grad_scale = grad_scale
         # self.reversed_loss_landscape = reversed_loss_landscape
+        self.input_name = input_name  # define input to classifier
 
     # def forward(self, input, log_softmax=True):
     def forward(self, output_dicts, hidden_name='hidden'):
 
-        classifier_input = output_dicts[hidden_name]
+        classifier_input = output_dicts[self.input_name]
         fix_norm = self.fix_norm
 
         if self.training:

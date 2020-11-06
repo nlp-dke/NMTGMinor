@@ -212,8 +212,8 @@ class TransformerEncoder(nn.Module):
         self.change_residual = None if self.change_residual_at is None else opt.change_residual
         self.change_att_query_at = opt.change_att_query_at
         self.change_att_query = None if self.change_att_query_at is None else opt.change_att_query
-        self.att_plot_path = None #'/home/dliu/src/SLT.KIT.private/systems/lrt/iwslt17.fewshot/att_no_pos/att_plot_de_fail.pt'
-        self.save_activation = None #'/home/dliu/src/SLT.KIT.private/systems/lrt/iwslt17/activations_adv/activation_nl.pt'
+        self.att_plot_path = None
+        self.save_activation = None
         # if opt.time == 'positional_encoding':
         #     self.time_transformer = positional_encoder
         # elif opt.time == 'gru':
@@ -240,6 +240,8 @@ class TransformerEncoder(nn.Module):
 
         self.language_classifier = opt.language_classifier
         self.language_classifier_sent = opt.language_classifier_sent
+
+        self.token_classifier_at = opt.token_classifier_at
 
 
     def build_modules(self, opt):
@@ -353,11 +355,13 @@ class TransformerEncoder(nn.Module):
         context = emb.transpose(0, 1)
 
         context = self.preprocess_layer(context)
-        # here: embedding
+
+        output_dict = {}
+
         for i, layer in enumerate(self.layer_modules):
             context = layer(context, mask_src, given_query=given_query, att_plot_path=self.att_plot_path)   # batch_size x len_src x d_model
 
-            if self.save_activation is not None:
+            if self.save_activation is not None and (i == len(self.layer_modules) - 1):
                 padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
                 try:
                     saved_att = torch.load(self.save_activation)
@@ -366,6 +370,9 @@ class TransformerEncoder(nn.Module):
 
                 saved_att[i].append(padded_context)
                 torch.save(saved_att, self.save_activation)
+
+            if self.token_classifier_at is not None and self.token_classifier_at == i+1:
+                output_dict['mid_layer_output'] = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
             # output of layer
         # From Google T2T
         # if normalization is done in layer_preprocess, then it should also be done
@@ -373,7 +380,9 @@ class TransformerEncoder(nn.Module):
         # a whole stack of unnormalized layer outputs.
         context = self.postprocess_layer(context)
 
-        output_dict = {'context': context, 'src_mask': mask_src}
+        output_dict['context'] = context
+        output_dict['src_mask'] = mask_src
+        # {'context': context, 'src_mask': mask_src}
 
         # return context, mask_src
         return output_dict
@@ -762,7 +771,7 @@ class Transformer(NMTModel):
         output_dict['logprobs'] = logprobs
 
         if self.encoder.language_classifier:  # make language classification
-            logprobs_lan = self.generator[1](encoder_output, hidden_name='context')
+            logprobs_lan = self.generator[1](encoder_output)
             output_dict['logprobs_lan'] = logprobs_lan
 
         # Mirror network: reverse the target sequence and perform backward language model
