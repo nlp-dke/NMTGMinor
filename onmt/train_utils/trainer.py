@@ -481,24 +481,7 @@ class XETrainer(BaseTrainer):
                         logprobs_lan = outputs['logprobs_lan']
                         # pad
                         logprobs_lan = logprobs_lan.masked_fill(outputs['src_mask'].permute(2, 0, 1), onmt.constants.PAD).type_as(logprobs_lan)
-                        # pred = torch.exp(logprobs_lan)
                         pred = logprobs_lan  # T, B, V
-                        # unvectorized version of prediction accuracy
-                        # for sent_idx in range(pred.shape[1]):  # T, B, V, for each sentence in batch
-                        #     for pos_idx in range(pred.shape[0]):  # for each token
-                        #         if not torch.all(pred[pos_idx, sent_idx, :] == 0.0):
-                        #         # if not torch.all(pred[pos_idx, sent_idx, :] == 1.0):  # if not at padded positions.
-                        #         #     if torch.abs(1.0 - torch.sum(pred[pos_idx, sent_idx, :])) < 0.001:
-                        #             total_predict += 1.0
-                        #             pred_idx = torch.argmax(pred[pos_idx, sent_idx, :], dim=0)
-                        #
-                        #             if pred_idx == (targets_src_lang[pos_idx, sent_idx]-1):
-                        #                 correct_predict += 1.0
-                        #             res[pred_idx] += 1.0
-                        #             # print('predicted', pred_idx, 'target', targets_src_lang[pos_idx, sent_idx])
-                        #             # else:
-                        #             #     print(pred[pos_idx, sent_idx, :]
-                        # print('correct, total, acc.: ', corrsect_predict, total_predict, correct_predict / total_predict)
 
                         pred_idx = torch.argmax(pred, dim=-1).cpu()  # T, B. starts from 0
                         # padding not counted, since 0 - 1 would be -1
@@ -575,7 +558,6 @@ class XETrainer(BaseTrainer):
         total_non_pads = 0
         report_loss, report_tgt_words = 0, 0
         report_classifier_loss, report_classifier_loss_rev = 0.0, 0.0
-        optimize_classifier = True
         report_src_words = 0
         start = time.time()
         n_samples = len(train_data)
@@ -882,10 +864,284 @@ class XETrainer(BaseTrainer):
             itr_progress = None
             resume = False
 
-# class XEAdversarialTrainer(XETrainer):
-#
-#     def __init__(self, model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer=True):
-#         super().__init__(self, model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer)
+
+class XEAdversarialTrainer(XETrainer):
+    def __init__(self, model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer=True):
+        super().__init__(model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer)
+
+    def train_epoch(self, epoch, resume=False, itr_progress=None):
+        global rec_ppl
+        opt = self.opt
+        train_data = self.train_data
+        streaming = opt.streaming
+
+        # Clear the gradients of the model
+        self.model.zero_grad()
+        self.model.reset_states()
+
+        dataset = train_data
+
+        data_iterator = generate_data_iterator(dataset, seed=self.opt.seed, num_workers=opt.num_workers,
+                                               epoch=epoch, buffer_size=opt.buffer_size)
+
+        if resume:
+            data_iterator.load_state_dict(itr_progress)
+
+        epoch_iterator = data_iterator.next_epoch_itr(not streaming, pin_memory=opt.pin_memory)
+
+        total_tokens, total_loss, total_words = 0, 0, 0
+        total_non_pads = 0
+        report_loss, report_tgt_words = 0, 0
+        report_classifier_loss, report_classifier_loss_rev = 0.0, 0.0
+        report_src_words = 0
+        start = time.time()
+        n_samples = len(train_data)
+
+        counter = 0
+        update_counter = 0
+        num_accumulated_words = 0
+        num_accumulated_sents = 0
+        denom = 3584
+        nan = False
+        optimize_classifier = True
+
+        if opt.streaming:
+            streaming_state = self.model.init_stream()
+        else:
+            streaming_state = None
+
+        i = data_iterator.iterations_in_epoch if not isinstance(train_data, list) else epoch_iterator.n_yielded
+
+        while not data_iterator.end_of_epoch():
+            curriculum = (epoch < opt.curriculum)
+
+            # this batch generator is not very clean atm
+            batch = next(epoch_iterator)
+            if isinstance(batch, list) and self.n_gpus == 1:
+                batch = batch[0]
+            batch = rewrap(batch)
+
+            if self.cuda:
+                batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
+
+            oom = False
+            try:
+                # Fetch ground truths
+                targets = batch.get('target_output')
+
+                tgt_mask = targets.data.ne(onmt.constants.PAD)
+
+                outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                     zero_encoder=opt.zero_encoder,
+                                     mirror=opt.mirror_loss, streaming_state=streaming_state)
+
+                batch_size = batch.size
+
+                outputs['tgt_mask'] = tgt_mask
+
+                loss_dict = self.loss_function(outputs, targets, model=self.model)
+                loss_data = loss_dict['data']
+                loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
+
+                optimizer = self.optim.optimizer
+
+                if epoch % 2 == 0:
+                    # freeze classifier
+                    self.model.generator[1].requires_grad_(False)
+                    # unfreeze enc & dec
+                    self.model.encoder.requires_grad_(True)
+                    self.model.decoder.requires_grad_(True)
+                    # use 2nd loss
+                    use_second_loss = epoch >= opt.adversarial_classifier_start_from
+
+                    # calculate gradient for enc & dec
+                    if self.cuda:
+                        with amp.scale_loss(loss, optimizer) as scaled_loss:
+                            scaled_loss.backward(retain_graph=use_second_loss)
+                    else:
+                        loss.backward(retain_graph=use_second_loss)
+
+                    # gradient from classifier
+                    if use_second_loss:
+                        if self.opt.token_classifier == 0:  # language ID
+                            targets_classifier = batch.get('targets_source_lang')
+                        elif self.opt.token_classifier == 1:  # predict source token ID
+                            targets_classifier = batch.get('source')
+                        elif self.opt.token_classifier == 2:  # predict positional ID
+                            targets_classifier = batch.get('source_pos')
+                            targets_classifier[targets_classifier != 0] += 1  # start from 0
+                            targets_classifier[0, :] += 1
+                        elif self.opt.token_classifier == 3:  # predict POS tag
+                            raise NotImplementedError
+
+                        classifier_loss_dict = self.loss_function(outputs, targets=targets_classifier,
+                                                                  model=self.model,
+                                                                  lan_classifier=True,
+                                                                  reverse_landscape=True)
+
+                        classifier_loss = classifier_loss_dict['loss'].div(
+                            denom)  # a little trick to avoid gradient overflow with fp16
+                        classifier_loss_data = 0
+                        classifier_loss_data_rev = classifier_loss_dict['data'] if classifier_loss_dict[
+                                                                                   'data'] is not None else 0
+
+                        # calculate gradient for classifier
+                        if self.cuda:
+                            with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
+                                scaled_loss.backward(retain_graph=True)
+                        else:
+                            classifier_loss.backward(retain_graph=True)
+                    else:
+                        classifier_loss_data, classifier_loss_data_rev = 0, 0
+
+                else:
+                    # freeze enc & dec
+                    self.model.generator[1].requires_grad_(True)
+                    self.model.encoder.requires_grad_(False)
+                    self.model.decoder.requires_grad_(False)
+
+                    if self.opt.token_classifier == 0:  # language ID
+                        targets_classifier = batch.get('targets_source_lang')
+                    elif self.opt.token_classifier == 1:  # predict source token ID
+                        targets_classifier = batch.get('source')
+                    elif self.opt.token_classifier == 2:  # predict positional ID
+                        targets_classifier = batch.get('source_pos')
+                        targets_classifier[targets_classifier != 0] += 1  # start from 0
+                        targets_classifier[0, :] += 1
+                    elif self.opt.token_classifier == 3:  # predict POS tag
+                        raise NotImplementedError
+
+                    classifier_loss_dict = self.loss_function(outputs, targets=targets_classifier,
+                                                              model=self.model,
+                                                              lan_classifier=True,
+                                                              reverse_landscape=False)
+                    classifier_loss = classifier_loss_dict['loss'].div(
+                        denom)  # a little trick to avoid gradient overflow with fp16
+                    classifier_loss_data = classifier_loss_dict['data'] if classifier_loss_dict[
+                                                                           'data'] is not None else 0
+                    classifier_loss_data_rev = 0
+                    # calc gradient for lan classifier
+                    if self.cuda:
+                        with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
+                            scaled_loss.backward()
+                    else:
+                        classifier_loss.backward()
+
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    print('| WARNING: ran out of memory on GPU , skipping batch')
+                    oom = True
+                    torch.cuda.empty_cache()
+                    loss = 0
+                    if opt.streaming:  # reset stream in this case ...
+                        streaming_state = self.model.init_stream()
+                else:
+                    raise e
+
+            if loss != loss:
+                # catching NAN problem
+                oom = True
+                self.model.zero_grad()
+                self.optim.zero_grad()
+                num_accumulated_words = 0
+                num_accumulated_sents = 0
+
+            if not oom:
+                src_size = batch.src_size
+                tgt_size = batch.tgt_size
+
+                counter = counter + 1
+                num_accumulated_words += tgt_size
+                num_accumulated_sents += batch_size
+
+                #   We only update the parameters after getting gradients from n mini-batches
+                update_flag = False
+                if 0 < opt.batch_size_update <= num_accumulated_words:
+                    update_flag = True
+                elif counter >= opt.update_frequency and 0 >= opt.batch_size_update:
+                    update_flag = True
+                elif i == n_samples - 1:  # update for the last minibatch
+                    update_flag = True
+
+                if update_flag:
+                    grad_denom = 1 / denom
+                    if self.opt.normalize_gradient:
+                        grad_denom = num_accumulated_words / denom
+                    normalize_gradients(amp.master_params(optimizer), grad_denom)
+                    # Update the parameters.
+                    if self.opt.max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), self.opt.max_grad_norm)
+                    self.optim.step(grad_denom=grad_denom)
+                    self.optim.zero_grad()
+                    self.model.zero_grad()
+                    counter = 0
+                    num_accumulated_words = 0
+                    num_accumulated_sents = 0
+                    num_updates = self.optim._step
+
+                    if opt.save_every > 0 and num_updates % opt.save_every == -1 % opt.save_every:
+                        valid_loss, _ = self.eval(self.valid_data, report_classifier=True, report_cm=True)
+                        valid_ppl = math.exp(min(valid_loss, 100))
+                        print('Validation perplexity: %g' % valid_ppl)
+
+                        ep = float(epoch) - 1. + ((float(i) + 1.) / n_samples)
+
+                        self.save(ep, valid_ppl, itr=data_iterator)
+
+                    update_counter += 1
+
+                # TODO: how to make this less hand crafty?!
+                # if epoch >= opt.adversarial_classifier_start_from and \
+                #         (not optimize_classifier and update_counter >= 10) or \
+                #         (optimize_classifier and update_counter >= 500):
+                #     print('============optimize_classifier <--', optimize_classifier)
+                #     optimize_classifier = not optimize_classifier
+                #     update_counter = 0
+                #     valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True, report_cm=True)
+                #     valid_ppl = math.exp(min(valid_loss, 100))
+                #     print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
+                #     print('============optimize_classifier -->', optimize_classifier)
+
+                num_words = tgt_size
+                report_loss += loss_data
+                report_classifier_loss += classifier_loss_data if self.opt.language_classifier else 0
+                report_classifier_loss_rev += classifier_loss_data_rev if self.opt.language_classifier else 0
+                report_tgt_words += num_words
+                report_src_words += src_size
+                total_loss += loss_data
+                total_words += num_words
+                total_tokens += batch.get('target_output').nelement()
+                total_non_pads += batch.get('target_output').ne(onmt.constants.PAD).sum().item()
+                optim = self.optim
+                batch_efficiency = total_non_pads / total_tokens
+
+                if i == 0 or (i % opt.log_interval == -1 % opt.log_interval):
+                    if epoch % 2 == 0:
+                        valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True, report_cm=True)
+                        valid_ppl = math.exp(min(valid_loss, 100))
+                        print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
+
+                    print(("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; classifier loss: %6.2f ; classifier rev loss: %6.2f ; lr: %.7f ; num updates: %7d " +
+                           "%5.0f src tok/s; %5.0f tgt tok/s; %s elapsed") %
+                          (epoch, i + 1, len(data_iterator),
+                           math.exp(report_loss / report_tgt_words),
+                           report_classifier_loss / float(report_src_words),
+                           report_classifier_loss_rev / float(report_src_words),
+                           optim.getLearningRate(),
+                           optim._step,
+                           report_src_words / (time.time() - start),
+                           report_tgt_words / (time.time() - start),
+                           str(datetime.timedelta(seconds=int(time.time() - self.start_time)))))
+
+                    report_loss, report_tgt_words = 0, 0
+                    report_classifier_loss, report_classifier_loss_rev = 0.0, 0.0
+                    report_src_words = 0
+                    start = time.time()
+
+                i = i + 1
+
+        return total_loss / total_words
+
 #
 #     def train_epoch(self, epoch, resume=False, itr_progress=None):
 #

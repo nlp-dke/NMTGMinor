@@ -6,7 +6,7 @@ import onmt.modules
 import argparse
 import torch
 import time, datetime
-from onmt.train_utils.trainer import XETrainer
+from onmt.train_utils.trainer import XETrainer, XEAdversarialTrainer
 from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc
 from onmt.model_factory import build_model, optimize_model
 from options import make_parser
@@ -343,7 +343,10 @@ def main():
     if len(opt.gpus) > 1 or opt.virtual_gpu > 1:
         raise NotImplementedError("Multi-GPU training is not supported at the moment.")
     else:
-        trainer = XETrainer(model, loss_function, train_data, valid_data, dicts, opt)
+        if not opt.adversarial_classifier:
+            trainer = XETrainer(model, loss_function, train_data, valid_data, dicts, opt)
+        else:
+            trainer = XEAdversarialTrainer(model, loss_function, train_data, valid_data, dicts, opt)
 
     trainer.run(checkpoint=checkpoint)
 

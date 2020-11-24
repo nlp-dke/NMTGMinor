@@ -246,6 +246,11 @@ def make_parser(parser):
                         help='Zero-out encoders during training')
 
     # Language similarity
+    parser.add_argument('-adversarial_classifier', action='store_true',
+                        help='Whether to use adversarial classifer')
+    parser.add_argument('-adversarial_classifier_start_from', type=int, default=9999,
+                        help='From which epoch will the adversarial classifier start')
+
     parser.add_argument('-change_residual_at', type=int, default=None,
                         help='Where to remove residual connections in encoder layer output. '
                              '1 (1st)|-1 (last)|0 (all)|None')
@@ -461,6 +466,12 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'save_classifier_activation'):
         opt.save_classifier_activation = False
+
+    if not hasattr(opt, 'adversarial_classifier'):
+        opt.adversarial_classifier = False
+
+    if not hasattr(opt, 'adversarial_classifier_start_from'):
+        opt.adversarial_classifier_start_from = 9999
 
     if not hasattr(opt, 'buffer_size'):
         opt.buffer_size = 16
