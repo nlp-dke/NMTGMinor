@@ -99,7 +99,8 @@ def main():
                                       augment=opt.augment_speech,
                                       upsampling=opt.upsampling,
                                       token_level_lang=opt.language_classifier_tok,
-                                      num_split=len(opt.gpus))
+                                      num_split=len(opt.gpus),
+                                      bidirectional=opt.bidirectional_translation)
         else:
             train_data = onmt.StreamDataset(train_dict['src'], train_dict['tgt'],
                                             src_sizes=None, tgt_sizes=None,
@@ -132,7 +133,8 @@ def main():
                                       data_type=dataset.get("type", "text"), sorting=True,
                                       batch_size_sents=opt.batch_size_sents,
                                       upsampling=opt.upsampling,
-                                      token_level_lang=opt.language_classifier_tok)
+                                      token_level_lang=opt.language_classifier_tok,
+                                      bidirectional=opt.bidirectional_translation)
         else:
             valid_data = onmt.StreamDataset(valid_dict['src'], valid_dict['tgt'],
                                             src_sizes=None, tgt_sizes=None,
@@ -207,7 +209,8 @@ def main():
                                       upsampling=opt.upsampling,
                                       cleaning=True, verbose=True,
                                       num_split=len(opt.gpus),
-                                      token_level_lang=opt.language_classifier_tok)
+                                      token_level_lang=opt.language_classifier_tok,
+                                      bidirectional=opt.bidirectional_translation)
         else:
             train_data = onmt.StreamDataset(train_src,
                                             train_tgt,
@@ -254,7 +257,8 @@ def main():
                                       src_align_right=opt.src_align_right,
                                       cleaning=True, verbose=True, debug=True,
                                       num_split=len(opt.gpus),
-                                      token_level_lang=opt.language_classifier_tok)
+                                      token_level_lang=opt.language_classifier_tok,
+                                      bidirectional=opt.bidirectional_translation)
         else:
             # for validation data, we have to go through sentences (very slow but to ensure correctness)
             valid_data = onmt.StreamDataset(valid_src, valid_tgt,

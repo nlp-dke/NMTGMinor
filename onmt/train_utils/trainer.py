@@ -378,7 +378,7 @@ class XETrainer(BaseTrainer):
             print(" * Early stopping at epoch %s as best epoch was %s ." % (epoch, best_epoch))
             sys.exit(0)
 
-    def eval(self, data, report_classifier=False, report_cm=False):
+    def eval(self, data, report_classifier=False, report_cm=False, bidirectional_translation=False):
         total_loss = 0
         total_words = 0
         total_adv_loss = 0.0
@@ -454,6 +454,20 @@ class XETrainer(BaseTrainer):
                 total_words += batch.tgt_size
 
                 total_src_words += batch.src_size
+
+                if bidirectional_translation:
+                    targets = batch.get('source_output')    # (T, B)
+                    tgt_mask = targets.ne(onmt.constants.PAD)
+                    outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                         mirror=opt.mirror_loss, streaming_state=streaming_state, reverse_src_tgt=True)
+                    outputs['tgt_mask'] = tgt_mask
+                    # normal loss
+                    loss_dict = self.loss_function(outputs, targets, model=self.model)
+                    loss_data = loss_dict['data']
+                    total_loss += loss_data
+                    total_words += batch.tgt_size
+                    total_src_words += batch.src_size
+
                 # adv loss
                 if opt.language_classifier and opt.language_classifier_tok:
                     if opt.token_classifier == 0:
@@ -541,7 +555,7 @@ class XETrainer(BaseTrainer):
         data_iterator = generate_data_iterator(dataset, seed=self.opt.seed, num_workers=opt.num_workers,
                                                epoch=epoch, buffer_size=opt.buffer_size)
 
-        if resume:  # TODO: previously working with batch_order=None, iteration=0
+        if resume:  # previously working with batch_order=None, iteration=0
             data_iterator.load_state_dict(itr_progress)
 
         epoch_iterator = data_iterator.next_epoch_itr(not streaming, pin_memory=opt.pin_memory)
@@ -614,6 +628,7 @@ class XETrainer(BaseTrainer):
             try:
                 # outputs is a dictionary containing keys/values necessary for loss function
                 # can be flexibly controlled within models for easier extensibility
+
                 targets = batch.get('target_output')
                 tgt_mask = targets.data.ne(onmt.constants.PAD)
 
@@ -622,9 +637,9 @@ class XETrainer(BaseTrainer):
                                      mirror=opt.mirror_loss, streaming_state=streaming_state)
 
                 batch_size = batch.size
-                #
+
                 outputs['tgt_mask'] = tgt_mask
-                #
+
                 loss_dict = self.loss_function(outputs, targets, model=self.model)
                 loss_data = loss_dict['data']
                 loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
@@ -637,9 +652,30 @@ class XETrainer(BaseTrainer):
                     # calculate gradient for enc / dec
                     if self.cuda:
                         with amp.scale_loss(loss, optimizer) as scaled_loss:
-                            scaled_loss.backward()
+                            scaled_loss.backward() #retain_graph=self.opt.bidirectional_translation)
                     else:
-                        loss.backward()
+                        loss.backward() #retain_graph=self.opt.bidirectional_translation)
+
+                    # do everything once again for tgt -> src
+                    if self.opt.bidirectional_translation:
+                        outputs_rev = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                                 zero_encoder=opt.zero_encoder,
+                                                 mirror=opt.mirror_loss, streaming_state=streaming_state,
+                                                 reverse_src_tgt=True)
+                        batch_size += batch.size
+                        targets = batch.get('source_output')
+                        src_mask = targets.data.ne(onmt.constants.PAD)
+                        outputs_rev['tgt_mask'] = src_mask
+
+                        loss_dict = self.loss_function(outputs_rev, targets, model=self.model)
+                        loss_data += loss_dict['data']
+                        loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
+
+                        if self.cuda:
+                            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                                scaled_loss.backward()
+                        else:
+                            loss.backward()
 
                 else:
                     # freeze enc & dec
@@ -693,8 +729,12 @@ class XETrainer(BaseTrainer):
                 num_accumulated_sents = 0
 
             if not oom:
-                src_size = batch.src_size
-                tgt_size = batch.tgt_size
+                if not self.opt.bidirectional_translation:
+                    src_size = batch.src_size
+                    tgt_size = batch.tgt_size
+                else:
+                    src_size = batch.src_size + batch.tgt_size
+                    tgt_size = src_size
 
                 counter = counter + 1
                 num_accumulated_words += tgt_size
@@ -726,7 +766,9 @@ class XETrainer(BaseTrainer):
                     num_updates = self.optim._step
 
                     if opt.save_every > 0 and num_updates % opt.save_every == -1 % opt.save_every:
-                        valid_loss, _ = self.eval(self.valid_data, report_classifier=self.opt.token_classifier is not None)
+                        valid_loss, _ = self.eval(self.valid_data,
+                                                  report_classifier=self.opt.token_classifier is not None,
+                                                  bidirectional_translation=self.opt.bidirectional_translation)
                         valid_ppl = math.exp(min(valid_loss, 100))
                         print('Validation perplexity: %g' % valid_ppl)
 
@@ -833,17 +875,15 @@ class XETrainer(BaseTrainer):
         # if opt.load_decoder_from:
         #     self.load_decoder_weight(opt.load_decoder_from)
 
-        valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=opt.token_classifier is not None)
-        valid_ppl = math.exp(min(valid_loss, 100))
-        print('Validation perplexity: %g, classifier loss: %6.6f' % (valid_ppl, valid_adv_loss))
-
         # if we are on a GPU: warm up the memory allocator
         if self.cuda:
             self.warm_up()
 
-            valid_loss, _ = self.eval(self.valid_data)
+            valid_loss, valid_adv_loss = self.eval(self.valid_data,
+                                                   report_classifier=opt.token_classifier is not None,
+                                                   bidirectional_translation=self.opt.bidirectional_translation)
             valid_ppl = math.exp(min(valid_loss, 100))
-            print('Validation perplexity: %g' % valid_ppl)
+            print('Validation perplexity: %g, classifier loss: %6.6f' % (valid_ppl, valid_adv_loss))
 
         self.start_time = time.time()
 

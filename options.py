@@ -268,8 +268,10 @@ def make_parser(parser):
     parser.add_argument('-multiway_src_valid', action='store_true',
                         help="""Use multiway source sentences in dev set""")
 
+    parser.add_argument('-bidirectional_translation', action='store_true',
+                        help="Whether to translate src -> tgt, tgt -> src simultaneously, given src -> tgt data")
     parser.add_argument('-sim_loss_type', type=int, default=None,
-                        help='Type of aux. loss to encourage language similarity. 1st digit: 1(by position)|2(mean)|3(max),'
+                        help='Type of auxilliary loss to encourage language similarity. 1st digit: 1(by position)|2(mean)|3(max),'
                              '2nd digit: 1(squared error)|...(abs error)')
     parser.add_argument('-aux_loss_weight', type=float, default=0.0,
                         help='Weight for the auxiliary loss')
@@ -472,6 +474,9 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'adversarial_classifier_start_from'):
         opt.adversarial_classifier_start_from = 9999
+
+    if not hasattr(opt, 'bidirectional_translation'):
+        opt.bidirectional_translation = False
 
     if not hasattr(opt, 'buffer_size'):
         opt.buffer_size = 16

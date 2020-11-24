@@ -71,7 +71,6 @@ parser.add_argument('-src_vocab_size', type=int, default=9999999,
 parser.add_argument('-tgt_vocab_size', type=int, default=9999999,
                     help="Size of the target vocabulary")
 parser.add_argument('-src_vocab',
-
                     help="Path to an existing source vocabulary")
 parser.add_argument('-tgt_vocab',
                     help="Path to an existing target vocabulary")
@@ -116,6 +115,9 @@ parser.add_argument('-num_threads', type=int, default=1,
                     help="Number of threads for multiprocessing")
 parser.add_argument('-verbose', action='store_true',
                     help="Print out information during preprocessing")
+
+parser.add_argument('-bidirectional_translation', action='store_true',
+                    help="Whether to also append BOS and EOS symbols to source sentences")
 
 parser.add_argument('-extend_vocab', action='store_true',
                     help="Extend existing vocabulary")
@@ -252,16 +254,24 @@ def make_translation_data(src_file, tgt_file, src_dicts, tgt_dicts, tokenizer, m
     src_sizes = []
     tgt_sizes = []
 
-    print("[INFO] Binarizing file %s ..." % src_file)
-    binarized_src = Binarizer.binarize_file(src_file, src_dicts, tokenizer,
-                                            bos_word=None, eos_word=None,
-                                            data_type=data_type,
-                                            num_workers=num_workers, verbose=verbose)
-
     if add_bos:
         tgt_bos_word = onmt.constants.BOS_WORD
     else:
         tgt_bos_word = None
+
+    print("[INFO] Binarizing file %s ..." % src_file)
+
+    if not opt.bidirectional_translation:
+        binarized_src = Binarizer.binarize_file(src_file, src_dicts, tokenizer,
+                                                bos_word=None, eos_word=None,
+                                                data_type=data_type,
+                                                num_workers=num_workers, verbose=verbose)
+    else:
+        print("[INFO] Appending BOS and EOS to %s ..." % src_file)
+        binarized_src = Binarizer.binarize_file(src_file, src_dicts, tokenizer,
+                                                bos_word=tgt_bos_word, eos_word=onmt.constants.EOS_WORD,
+                                                data_type=data_type,
+                                                num_workers=num_workers, verbose=verbose)
 
     print("[INFO] Binarizing file %s ..." % tgt_file)
     binarized_tgt = Binarizer.binarize_file(tgt_file, tgt_dicts, tokenizer,

@@ -712,7 +712,7 @@ class Transformer(NMTModel):
         return
 
     def forward(self, batch, target_mask=None, streaming=False, zero_encoder=False,
-                mirror=False, streaming_state=None):
+                mirror=False, streaming_state=None, reverse_src_tgt=False):
         """
         :param streaming_state:
         :param streaming:
@@ -725,14 +725,24 @@ class Transformer(NMTModel):
         if self.switchout > 0 and self.training:
             batch.switchout(self.switchout, self.src_vocab_size, self.tgt_vocab_size)
 
-        src = batch.get('source')
-        tgt = batch.get('target_input')
-        src_pos = batch.get('source_pos')
-        tgt_pos = batch.get('target_pos')
-        src_lang = batch.get('source_lang')
-        tgt_lang = batch.get('target_lang')
-        src_lengths = batch.src_lengths
-        tgt_lengths = batch.tgt_lengths
+        if not reverse_src_tgt:
+            src = batch.get('source')
+            tgt = batch.get('target_input')
+            src_pos = batch.get('source_pos')
+            tgt_pos = batch.get('target_pos')
+            src_lang = batch.get('source_lang')
+            tgt_lang = batch.get('target_lang')
+            src_lengths = batch.src_lengths
+            tgt_lengths = batch.tgt_lengths
+        else:   # use target as input, source as output (instead of using source as input, target as output)
+            src = batch.get('target_as_source')
+            tgt = batch.get('source_input')
+            src_pos = batch.get('target_pos')
+            tgt_pos = batch.get('source_pos')
+            src_lang = batch.get('target_lang')
+            tgt_lang = batch.get('source_lang')
+            src_lengths = batch.tgt_lengths
+            tgt_lengths = batch.src_lengths
 
         src = src.transpose(0, 1)  # transpose to have batch first
         tgt = tgt.transpose(0, 1)

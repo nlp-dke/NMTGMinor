@@ -47,6 +47,7 @@ def build_tm_model(opt, dicts):
         generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
                                                           fix_norm=opt.fix_norm_output_embedding)]
 
+    # build classifier
     if opt.language_classifier:
         mid_layer_size = opt.language_classifer_mid_layer_size
 
@@ -60,9 +61,6 @@ def build_tm_model(opt, dicts):
             elif opt.token_classifier == 2:
                 # predict positional ID
                 output_size = opt.max_position_length
-            elif opt.token_classifier == 3:
-                # predict POS tag
-                raise NotImplementedError
             else:
                 raise NotImplementedError
         else:
