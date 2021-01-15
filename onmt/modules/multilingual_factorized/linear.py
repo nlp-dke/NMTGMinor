@@ -109,7 +109,7 @@ class BatchEnsembleLinearFunction(torch.autograd.Function):
 class MultilingualLinear(torch.nn.Module):
 
     def __init__(self, input_size, output_size, n_factors=1, rank=1,
-                 use_multiplicative=False, weight_drop=0.0, mfw_activation="none"):
+                 use_multiplicative=False, weight_drop=0.0, mfw_activation="none", mfw_normalize=False):
 
         super().__init__()
 
@@ -126,6 +126,8 @@ class MultilingualLinear(torch.nn.Module):
             self.rm = torch.nn.Parameter(torch.Tensor(n_factors, 1, input_size))
             self.sm = torch.nn.Parameter(torch.Tensor(n_factors, 1, output_size))
 
+        self.mfw_normalize = mfw_normalize
+
         self.reset_parameters()
         self.mfw_activation = mfw_activation.lower()
 
@@ -139,9 +141,12 @@ class MultilingualLinear(torch.nn.Module):
         if self.use_multiplicative:
             # torch.nn.init.normal_(self.rm, 0.0, 1)
             # torch.nn.init.normal_(self.sm, 0.0, 1)
-            with torch.no_grad():
-                self.rm.bernoulli_(0.5).mul_(-2).add_(1)  # -1 1 -1 1
-                self.sm.bernoulli_(0.5).mul_(-2).add_(1)
+
+            torch.nn.init.constant_(self.rm, 1.0)
+            torch.nn.init.constant_(self.sm, 1.0)
+            # with torch.no_grad():
+            #     self.rm.bernoulli_(0.5).mul_(-2).add_(1)  # -1 1 -1 1
+            #     self.sm.bernoulli_(0.5).mul_(-2).add_(1)
 
         torch.nn.init.normal_(self.r, 0.0, 0.02)
         torch.nn.init.normal_(self.s, 0.0, 0.02)
@@ -161,13 +166,23 @@ class MultilingualLinear(torch.nn.Module):
         if indices.size(0) == 1 and len(indices.shape) == 1:
             r = torch.index_select(self.r, 0, indices).squeeze(0)
             s = torch.index_select(self.s, 0, indices).squeeze(0)
-
+            #
             # weight_mask = torch.sum(torch.einsum('bi,bj->bij', (s, r)), dim=0)
             # weight_mask = torch.bmm(s.unsqueeze(-1), r.unsqueeze(1))
             if self.use_multiplicative:
                 rm = torch.index_select(self.rm, 0, indices).squeeze(0)
                 sm = torch.index_select(self.sm, 0, indices).squeeze(0)
-                weight_ = weight_ * torch.sum(torch.bmm(rm.unsqueeze(-1), sm.unsqueeze(1)), dim=0)
+
+                scale = torch.sum(torch.bmm(rm.unsqueeze(-1), sm.unsqueeze(1)), dim=0)
+                if self.mfw_normalize:
+                    eps = 1e-5
+                    scale.div_(torch.norm(weight_) + eps)
+
+                weight_ = weight_ * scale
+
+            weight_mask = torch.bmm(r.unsqueeze(-1), s.unsqueeze(1))
+            weight_mask = torch.sum(weight_mask, dim=0)
+            weight_ = weight_ + weight_mask
 
             if self.mfw_activation == "none":
                 weight_ = weight_
@@ -175,12 +190,14 @@ class MultilingualLinear(torch.nn.Module):
                 weight_ = F.gelu(weight_)
             elif self.mfw_activation == "silu":
                 weight_ = F.silu(weight_)
+            elif self.mfw_activation == "tanh":
+                weight_ = torch.tanh(weight_)
+            elif self.mfw_activation == "sigmoid":
+                weight_ = torch.sigmoid(weight_)
+            elif self.mfw_activation == "relu":
+                weight_ = torch.relu(weight_)
             else:
                 raise NotImplementedError
-
-            weight_mask = torch.bmm(r.unsqueeze(-1), s.unsqueeze(1))
-            weight_mask = torch.sum(weight_mask, dim=0)
-            weight_ = weight_ + weight_mask
 
             input = F.linear(input, weight_.t(), self.bias)
             # input = torch.addmm(self.bias, input.view(-1, input.size(-1)), weight_)
@@ -212,17 +229,23 @@ class MFWPositionWiseFeedForward(torch.nn.Module):
     """
 
     def __init__(self, model_size, inner_size, dropout=0., variational=False, activation='relu',
-                 n_languages=1, rank=1, use_multiplicative=False, weight_drop=0.0, mfw_activation='none'):
+                 n_languages=1, rank=1, use_multiplicative=False, weight_drop=0.0,
+                 mfw_activation='none', mfw_normalize=False):
         super().__init__()
         self.input_linear = MultilingualLinear(model_size, inner_size, n_languages,
-                                               rank, use_multiplicative, weight_drop, mfw_activation=mfw_activation)
+                                               rank, use_multiplicative, weight_drop,
+                                               mfw_activation=mfw_activation,
+                                               mfw_normalize=mfw_normalize)
         self.output_linear = MultilingualLinear(inner_size, model_size, n_languages,
-                                                rank, use_multiplicative, weight_drop, mfw_activation=mfw_activation)
+                                                rank, use_multiplicative, weight_drop,
+                                                mfw_activation=mfw_activation,
+                                                mfw_normalize=mfw_normalize)
         self.variational = variational
         self.dropout = dropout
         self.activation = activation
         self.n_languages = n_languages
         self.weight_drop = weight_drop
+        self.mfw_normalize = mfw_normalize
 
         if self.variational:
             from onmt.modules.dropout import variational_dropout

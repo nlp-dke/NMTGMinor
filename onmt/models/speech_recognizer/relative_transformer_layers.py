@@ -140,13 +140,15 @@ class RelativeTransformerEncoderLayer(nn.Module):
                                                               n_languages=opt.n_languages, rank=opt.mfw_rank,
                                                               use_multiplicative=opt.mfw_multiplicative,
                                                               weight_drop=self.weight_drop,
-                                                              mfw_activation=opt.mfw_activation)
+                                                              mfw_activation=opt.mfw_activation,
+                                                              mfw_normalize=opt.mfw_normalize)
 
             self.multihead = MFWRelativeSelfMultiheadAttn(opt.model_size, opt.n_heads, opt.attn_dropout,
                                                           n_languages=opt.n_languages, rank=opt.mfw_rank,
                                                           use_multiplicative=opt.mfw_multiplicative,
                                                           weight_drop=self.weight_drop,
-                                                          mfw_activation=opt.mfw_activation)
+                                                          mfw_activation=opt.mfw_activation,
+                                                          mfw_normalize=opt.mfw_normalize)
 
         elif self.mpw:
             if not self.no_ffn:
@@ -299,7 +301,8 @@ class RelativeTransformerDecoderLayer(nn.Module):
                                                             n_languages=opt.n_languages, rank=opt.mfw_rank,
                                                             use_multiplicative=opt.mfw_multiplicative,
                                                             weight_drop=self.weight_drop,
-                                                            mfw_activation=opt.mfw_activation)
+                                                            mfw_activation=opt.mfw_activation,
+                                                            mfw_normalize=opt.mfw_normalize)
             elif self.mpw:
                 self.multihead_src = MPEncdecMultiheadAttn(opt.n_heads, opt.model_size, opt.attn_dropout,
                                                            factor_size=opt.mpw_factor_size)
@@ -320,13 +323,15 @@ class RelativeTransformerDecoderLayer(nn.Module):
                                                           n_languages=opt.n_languages, rank=opt.mfw_rank,
                                                           use_multiplicative=opt.mfw_multiplicative,
                                                           weight_drop=self.weight_drop,
-                                                          mfw_activation=opt.mfw_activation)
+                                                          mfw_activation=opt.mfw_activation,
+                                                          mfw_normalize=opt.mfw_normalize)
 
             self.multihead_tgt = MFWRelativeSelfMultiheadAttn(opt.model_size, opt.n_heads, opt.attn_dropout,
                                                               n_languages=opt.n_languages, rank=opt.mfw_rank,
                                                               use_multiplicative=opt.mfw_multiplicative,
                                                               weight_drop=self.weight_drop,
-                                                              mfw_activation=opt.mfw_activation)
+                                                              mfw_activation=opt.mfw_activation,
+                                                              mfw_normalize=opt.mfw_normalize)
         elif self.mpw:
             self.feedforward = MPPositionWiseFeedForward(opt.model_size, opt.inner_size, opt.dropout,
                                                          variational=self.variational,

@@ -292,7 +292,13 @@ class SpeechTransformerDecoder(TransformerDecoder):
 
         """ Embedding: batch_size x len_tgt x d_model """
         input = input.transpose(0, 1)  # T x B
-        emb = embedded_dropout(self.word_lut, input, dropout=self.word_dropout if self.training else 0)
+        if not self.multi_embedding:
+            word_lut = self.word_lut
+        else:
+            word_lut = self.word_lut.embeddings[str(tgt_lang.item())]
+
+        emb = embedded_dropout(word_lut, input, dropout=self.word_dropout if self.training else 0)
+
         emb = emb * math.sqrt(self.model_size)
 
         mem_len = 0
@@ -404,7 +410,11 @@ class SpeechTransformerDecoder(TransformerDecoder):
             input_ = input.transpose(0, 1)  # from B x T to T x B
 
         """ Embedding: batch_size x 1 x d_model """
-        emb = self.word_lut(input_) * math.sqrt(self.model_size)
+        if not self.multi_embedding:
+            word_lut = self.word_lut
+        else:
+            word_lut = self.word_lut.embeddings[str(lang.item())]
+        emb = word_lut(input_) * math.sqrt(self.model_size)
         input = input.transpose(0, 1)
         klen = input.size(0)
         # emb = self.word_lut(input) * math.sqrt(self.model_size)

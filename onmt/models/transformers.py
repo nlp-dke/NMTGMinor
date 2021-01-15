@@ -282,6 +282,7 @@ class TransformerDecoder(nn.Module):
         self.postprocess_layer = PrePostProcessing(self.model_size, 0, sequence='n')
 
         self.word_lut = embedding
+        self.multi_embedding = not hasattr(self.word_lut, 'weight')
 
         # Using feature embeddings in models
         self.language_embeddings = language_embeddings
@@ -546,7 +547,14 @@ class Transformer(NMTModel):
         super().__init__(encoder, decoder, generator, rec_decoder, rec_generator, ctc=ctc)
         self.model_size = self.decoder.model_size
         self.switchout = self.decoder.switchout
-        self.tgt_vocab_size = self.decoder.word_lut.weight.size(0)
+
+        if hasattr(self.decoder.word_lut, 'weight'):
+            self.multi_embedding = False
+            self.tgt_vocab_size = self.decoder.word_lut.weight.size(0)
+        else:
+            self.multi_embedding = True
+            self.tgt_vocab_sizes = self.decoder.word_lut.vocab_sizes
+        # self.decoder.multi_embedding = self.multi_embedding
 
         if self.encoder.input_type == 'text':
             self.src_vocab_size = self.encoder.word_lut.weight.size(0)
@@ -563,10 +571,24 @@ class Transformer(NMTModel):
             self.rec_linear = nn.Linear(decoder.model_size, decoder.model_size)
 
         if self.ctc:
-            self.ctc_linear = nn.Linear(encoder.model_size, self.tgt_vocab_size)
+            if not self.multi_embedding:
+                self.ctc_linear = nn.Linear(encoder.model_size, self.tgt_vocab_size)
+            else:
+                self.ctc_linear = nn.ModuleDict()
+                for i in self.tgt_vocab_sizes:
+                    linear = nn.Linear(encoder.model_size, self.tgt_vocab_sizes[i])
+                    self.ctc_linear[str(i)] = linear
 
     def reset_states(self):
         return
+
+    def tie_weights(self):
+        if self.multi_embedding:
+            for i in self.tgt_vocab_sizes:
+                if hasattr(self.generator[0].linears[str(i)], 'weight'):
+                    self.generator[0].linears[str(i)].weight = self.decoder.word_lut.embeddings[str(i)].weight
+        else:
+            self.generator[0].linear.weight = self.decoder.word_lut.weight
 
     def forward(self, batch, target_mask=None, streaming=False, zero_encoder=False,
                 mirror=False, streaming_state=None, nce=False):
@@ -629,13 +651,17 @@ class Transformer(NMTModel):
         output_dict['target_mask'] = target_mask
         output_dict['streaming_state'] = streaming_state
         output_dict['target'] = batch.get('target_output')
+        output_dict['tgt_lang'] = tgt_lang
         # output_dict['lid_logits'] = decoder_output['lid_logits']
 
         # final layer: computing softmax
         if self.training and nce:
             output_dict = self.generator[0](output_dict)
         else:
-            logprobs = self.generator[0](output_dict)['logits']
+            if not self.multi_embedding:
+                logprobs = self.generator[0](output_dict)['logits']
+            else:
+                logprobs = self.generator[0](output_dict, tgt_lang)['logits']
             output_dict['logprobs'] = logprobs
 
         # Mirror network: reverse the target sequence and perform backward language model
@@ -687,7 +713,10 @@ class Transformer(NMTModel):
 
         # compute the logits for each encoder step
         if self.ctc:
-            output_dict['encoder_logits'] = self.ctc_linear(output_dict['context'])
+            if not self.multi_embedding:
+                output_dict['encoder_logits'] = self.ctc_linear(output_dict['context'])
+            else:
+                output_dict['encoder_logits'] = self.ctc_linear[str(tgt_lang.item())](output_dict['context'])
 
         return output_dict
 

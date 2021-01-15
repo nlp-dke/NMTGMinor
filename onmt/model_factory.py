@@ -59,49 +59,80 @@ def build_tm_model(opt, dicts):
         assert opt.encoder_type == 'text'
 
     # BUILD GENERATOR
-    if opt.copy_generator:
-        if opt.nce_noise > 0:
-            print("[INFO] Copy generator overrides NCE.")
-            opt.nce = False
-            opt.nce_noise = 0
-        generators = [CopyGenerator(opt.model_size, dicts['tgt'].size(),
-                                    fix_norm=opt.fix_norm_output_embedding)]
-    elif opt.nce_noise > 0:
-        from onmt.modules.nce.nce_linear import NCELinear
-        from onmt.modules.nce.nce_utils import build_unigram_noise
-        noise_distribution = build_unigram_noise(torch.FloatTensor(list(dicts['tgt'].frequencies.values())))
+    if not opt.multi_dataset:
+        if opt.copy_generator:
+            if opt.nce_noise > 0:
+                print("[INFO] Copy generator overrides NCE.")
+                opt.nce = False
+                opt.nce_noise = 0
+            generators = [CopyGenerator(opt.model_size, dicts['tgt'].size(),
+                                        fix_norm=opt.fix_norm_output_embedding)]
+        elif opt.nce_noise > 0:
+            from onmt.modules.nce.nce_linear import NCELinear
+            from onmt.modules.nce.nce_utils import build_unigram_noise
+            noise_distribution = build_unigram_noise(torch.FloatTensor(list(dicts['tgt'].frequencies.values())))
 
-        generator = NCELinear(opt.model_size, dicts['tgt'].size(), fix_norm=opt.fix_norm_output_embedding,
-                              noise_distribution=noise_distribution, noise_ratio=opt.nce_noise)
-        generators = [generator]
-    else:
-        generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
-                                                          fix_norm=opt.fix_norm_output_embedding)]
+            generator = NCELinear(opt.model_size, dicts['tgt'].size(), fix_norm=opt.fix_norm_output_embedding,
+                                  noise_distribution=noise_distribution, noise_ratio=opt.nce_noise)
+            generators = [generator]
+        else:
+            generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
+                                                              fix_norm=opt.fix_norm_output_embedding)]
+
+            if opt.ctc_loss != 0:
+                generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size()))
 
     # BUILD EMBEDDINGS
-    if 'src' in dicts:
-        embedding_src = nn.Embedding(dicts['src'].size(),
-                                     opt.model_size,
-                                     padding_idx=onmt.constants.PAD)
-    else:
-        embedding_src = None
+    if not opt.multi_embedding:
+        if 'src' in dicts:
+            embedding_src = nn.Embedding(dicts['src'].size(),
+                                         opt.model_size,
+                                         padding_idx=onmt.constants.PAD)
+        else:
+            embedding_src = None
 
-    if opt.join_embedding and embedding_src is not None:
-        embedding_tgt = embedding_src
-        print("* Joining the weights of encoder and decoder word embeddings")
+        if opt.join_embedding and embedding_src is not None:
+            embedding_tgt = embedding_src
+            print("* Joining the weights of encoder and decoder word embeddings")
+        else:
+            embedding_tgt = nn.Embedding(dicts['tgt'].size(),
+                                         opt.model_size,
+                                         padding_idx=onmt.constants.PAD)
     else:
-        embedding_tgt = nn.Embedding(dicts['tgt'].size(),
-                                     opt.model_size,
-                                     padding_idx=onmt.constants.PAD)
+        # for multi embedding
+        assert opt.encoder_type == "audio", "Currently multi-embedding only supports multiASR"
+
+        # vocab_sizes = list()
+        # opt.n_languages = len(dicts['langs'])
+        # n_languages = len(dicts['langs'])
+        # idx_to_lang = dict()
+        vocab_sizes = dict()
+        for lang in dicts['langs']:
+            if lang in dicts:
+                vocab_sizes[dicts['langs'][lang]] = dicts[lang].size()
+            else:
+                vocab_sizes[dicts['langs'][lang]] = 0
+
+        from onmt.modules.multilingual_factorized.multi_embeddings import MultiEmbedding, MultiGenerator
+        embedding_tgt = MultiEmbedding(vocab_sizes, opt.model_size,
+                                       padding_idx=onmt.constants.PAD)
+
+        generator = MultiGenerator(opt.model_size, vocab_sizes, fix_norm=opt.fix_norm_output_embedding)
+        generators = [generator]
+
+        # if opt.ctc_loss != 0:
+        #     ctc_generator = MultiGenerator(opt.model_size, vocab_sizes, fix_norm=opt.fix_norm_output_embedding)
+        #     generators.append(ctc_generator)
+        #
+        # #     generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size()))
+        # # generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
+        # #                                                  fix_norm=opt.fix_norm_output_embedding)]
 
     if opt.use_language_embedding:
         print("* Create language embeddings with %d languages" % len(dicts['langs']))
         language_embeddings = nn.Embedding(len(dicts['langs']), opt.model_size)
     else:
         language_embeddings = None
-
-    if opt.ctc_loss != 0:
-        generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size() + 1))
 
     if opt.model in ['conformer', 'speech_transformer', 'hybrid_transformer']:
         onmt.constants.init_value = opt.param_init

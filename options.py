@@ -303,6 +303,8 @@ def make_parser(parser):
     parser.add_argument('-mfw_activation', type=str, default="none",
                         help="Using activation function for the MFW so  W = f(W^ * M + A'). "
                              "Currently accepting gelu/silu")
+    parser.add_argument('-mfw_normalize', action='store_true',
+                        help='normalize W = W^ * M + A in the weight normalization style')
 
     parser.add_argument('-multilingual_partitioned_weights', action='store_true',
                         help='Partition the weights in the multilingual models')
@@ -320,6 +322,8 @@ def make_parser(parser):
                         help='New norm for each language')
     parser.add_argument('-adapter_bottleneck_size', type=int, default=1024,
                         help='New norm for each language')
+    parser.add_argument('-multi_embedding', action='store_true',
+                        help='New embedding / output layer for each layer')
 
     # for Reformer
     # parser.add_argument('-lsh_src_attention', action='store_true',
@@ -533,5 +537,11 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'mfw_activation'):
         opt.mfw_activation = "none"
+
+    if not hasattr(opt, 'mfw_normalize'):
+        opt.mfw_normalize = False
+
+    if not hasattr(opt, 'multi_embedding'):
+        opt.multi_embedding = False
 
     return opt

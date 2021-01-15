@@ -73,7 +73,7 @@ parser.add_argument('-tgt_vocab_size', type=int, default=9999999,
                     help="Size of the target vocabulary")
 
 parser.add_argument('-load_dict',
-                    help="Path to an existing source vocabulary")
+                    help="Path to an existing full vocabularies (the .pt file)")
 parser.add_argument('-src_vocab',
                     help="Path to an existing source vocabulary")
 parser.add_argument('-tgt_vocab',
@@ -122,6 +122,10 @@ parser.add_argument('-starting_train_idx', type=int, default=0,
                     help="")
 parser.add_argument('-starting_valid_idx', type=int, default=0,
                     help="")
+parser.add_argument('-separate_dictionary', action='store_true',
+                    help="generate a separated Dict for each language.")
+parser.add_argument('-save_separate_dictionary', action='store_true',
+                    help="save separated Dict for each language.")
 
 opt = parser.parse_args()
 
@@ -455,21 +459,49 @@ def main():
     tgt_train_files = opt.train_tgt.split("|")
     # for ASR and LM we only need to build vocab for the 'target' language
 
-    # TODO: adding new words to the existing dictionary in case loading from previously created dict
-    if opt.asr or opt.lm:
-        dicts['tgt'] = init_vocab('target', tgt_train_files, opt.tgt_vocab,
-                                  opt.tgt_vocab_size, tokenizer, num_workers=opt.num_threads)
-    elif opt.join_vocab:
-        dicts['src'] = init_vocab('source', set(src_train_files + tgt_train_files), opt.src_vocab,
-                                  opt.tgt_vocab_size, tokenizer, num_workers=opt.num_threads)
-        dicts['tgt'] = dicts['src']
+    # TODO: create separate dictionary for each language if needed
+    if not opt.separate_dictionary:
+
+        src = 'src'
+        tgt = 'tgt'
+
+        if opt.asr or opt.lm:
+            dicts[tgt] = init_vocab('target', tgt_train_files, opt.tgt_vocab,
+                                    opt.tgt_vocab_size, tokenizer, num_workers=opt.num_threads)
+        elif opt.join_vocab:
+            dicts[src] = init_vocab('source', set(src_train_files + tgt_train_files), opt.src_vocab,
+                                    opt.tgt_vocab_size, tokenizer, num_workers=opt.num_threads)
+            dicts[tgt] = dicts[src]
+
+        else:
+            dicts[src] = init_vocab('source', src_train_files, opt.src_vocab,
+                                    opt.src_vocab_size, tokenizer, num_workers=opt.num_threads)
+
+            dicts[tgt] = init_vocab('target', tgt_train_files, opt.tgt_vocab,
+                                    opt.tgt_vocab_size, tokenizer, num_workers=opt.num_threads)
 
     else:
-        dicts['src'] = init_vocab('source', src_train_files, opt.src_vocab,
-                                  opt.src_vocab_size, tokenizer, num_workers=opt.num_threads)
 
-        dicts['tgt'] = init_vocab('target', tgt_train_files, opt.tgt_vocab,
-                                  opt.tgt_vocab_size, tokenizer, num_workers=opt.num_threads)
+        print("START")
+        assert opt.asr, "Only ASR is supported at the moment. "  # currently only supports ASR
+        tgt_train_files = dict()
+
+        all_files = opt.train_tgt.split("|")
+        tgt_langs = opt.train_tgt_lang.split("|")
+
+        for (lang, tgt_file) in zip(tgt_langs, all_files):
+
+            assert lang != "langs", "Use a different name for this language, not 'langs'. "
+
+            if lang not in tgt_train_files:
+                tgt_train_files[lang] = list()
+
+            tgt_train_files[lang].append(tgt_file)
+
+        for lang in tgt_train_files:
+            # pre existed vocab file is None?
+            dicts[lang] = init_vocab(lang, tgt_train_files[lang], None,
+                                     opt.tgt_vocab_size, tokenizer, num_workers=opt.num_threads)
 
     elapse = str(datetime.timedelta(seconds=int(time.time() - start)))
     print("Vocabulary generated after %s" % elapse)
@@ -498,8 +530,13 @@ def main():
         for (src_file, tgt_file, src_lang, tgt_lang) in zip(src_input_files, tgt_input_files, src_langs, tgt_langs):
             # First, read and convert data to tensor format
 
+            if opt.separate_dictionary:
+                dict_obj = dicts[tgt_lang]
+            else:
+                dict_obj = dicts['tgt']
+
             src_data, tgt_data, src_sizes, tgt_sizes = make_asr_data(src_file, tgt_file,
-                                                                     dicts['tgt'], tokenizer,
+                                                                     dict_obj, tokenizer,
                                                                      max_src_length=opt.src_seq_length,
                                                                      max_tgt_length=opt.tgt_seq_length,
                                                                      input_type=opt.input_type,
@@ -536,7 +573,6 @@ def main():
             # save data immediately
             save_dataset(path, data, opt.format, dicts, opt.src_type)
             idx = idx + 1
-            # create
 
         print('Preparing validation ...')
 
@@ -555,8 +591,14 @@ def main():
         idx = opt.starting_valid_idx
 
         for (src_file, tgt_file, src_lang, tgt_lang) in zip(src_input_files, tgt_input_files, src_langs, tgt_langs):
+
+            if opt.separate_dictionary:
+                dict_obj = dicts[tgt_lang]
+            else:
+                dict_obj = dicts['tgt']
+
             src_data, tgt_data, src_sizes, tgt_sizes = make_asr_data(src_file, tgt_file,
-                                                                     dicts['tgt'], tokenizer,
+                                                                     dict_obj, tokenizer,
                                                                      max_src_length=max(1024, opt.src_seq_length),
                                                                      max_tgt_length=max(1024, opt.tgt_seq_length),
                                                                      input_type=opt.input_type,
@@ -707,10 +749,16 @@ def main():
     print("Saving dictionary to %s" % (opt.save_data + '.dict.pt'))
     torch.save(dicts, opt.save_data + '.dict.pt')
 
-    if opt.src_vocab is None and opt.asr == False and opt.lm == False:
-        save_vocabulary('source', dicts['src'], opt.save_data + '.src.dict')
-    if opt.tgt_vocab is None:
-        save_vocabulary('target', dicts['tgt'], opt.save_data + '.tgt.dict')
+    if not opt.separate_dictionary:
+        if opt.src_vocab is None and opt.asr == False and opt.lm == False:
+            save_vocabulary('source', dicts['src'], opt.save_data + '.src.dict')
+        if opt.tgt_vocab is None:
+            save_vocabulary('target', dicts['tgt'], opt.save_data + '.tgt.dict')
+    else:
+        if opt.save_separate_dictionary:
+            for lang in dicts:
+                if lang != 'langs':
+                    save_vocabulary(lang, dicts[lang], opt.save_data + '.%s.dict' % lang)
 
     print("Finished.")
 

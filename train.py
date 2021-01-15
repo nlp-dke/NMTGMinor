@@ -9,7 +9,7 @@ import time, datetime
 from onmt.train_utils.trainer import XETrainer
 from onmt.data.mmap_indexed_dataset import MMapIndexedDataset
 from onmt.data.scp_dataset import SCPIndexDataset
-from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc
+from onmt.modules.loss import NMTLossFunc
 from onmt.model_factory import build_model, optimize_model
 from onmt.bayesian_factory import build_model as build_bayesian_model
 from options import make_parser
@@ -405,24 +405,36 @@ def main():
         print("* Loading dictionaries from the checkpoint")
         dicts = checkpoint['dicts']
     else:
-        dicts['tgt'].patch(opt.patch_vocab_multiplier)
+        if not opt.multi_embedding:
+            dicts['tgt'].patch(opt.patch_vocab_multiplier)
+        else:
+            for lang in dicts:
+                if lang != "langs":
+                    dicts[lang].patch(opt.patch_vocab_multiplier)
         checkpoint = None
 
     # Put the vocab mask from dicts to the datasets
-    for data in [train_data, valid_data]:
-        if isinstance(data, list):
-            for i, data_ in enumerate(data):
-                data_.set_mask(dicts['tgt'].vocab_mask)
-                data[i] = data_
-        else:
-            data.set_mask(dicts['tgt'].vocab_mask)
+    # for data in [train_data, valid_data]:
+    #     if isinstance(data, list):
+    #         for i, data_ in enumerate(data):
+    #             data_.set_mask(dicts['tgt'].vocab_mask)
+    #             data[i] = data_
+    #     else:
+    #         data.set_mask(dicts['tgt'].vocab_mask)
 
-    if "src" in dicts:
-        print(' * vocabulary size. source = %d; target = %d' %
-              (dicts['src'].size(), dicts['tgt'].size()))
+    if not opt.multi_embedding:
+        if "src" in dicts:
+            print(' * vocabulary size. source = %d; target = %d' %
+                  (dicts['src'].size(), dicts['tgt'].size()))
+        else:
+            print('[INFO] vocabulary size. target = %d' %
+                  (dicts['tgt'].size()))
     else:
-        print('[INFO] vocabulary size. target = %d' %
-              (dicts['tgt'].size()))
+        for lang in dicts:
+            if lang != "langs":
+                print('[INFO] vocabulary size for language %s: %d' %
+                      (lang, dicts[lang].size()))
+                # dicts[lang].patch(opt.patch_vocab_multiplier)
 
     print('* Building model...')
 
@@ -443,10 +455,22 @@ def main():
             loss_function = NCELoss(opt.model_size, dicts['tgt'].size(), noise_ratio=opt.nce_noise,
                                     logz=9, label_smoothing=opt.label_smoothing)
         else:
-            loss_function = NMTLossFunc(opt.model_size, dicts['tgt'].size(),
-                                        label_smoothing=opt.label_smoothing,
-                                        mirror=opt.mirror_loss,
-                                        fast_xentropy=opt.fast_xentropy)
+            if not opt.multi_embedding:
+                loss_function = NMTLossFunc(opt.model_size, dicts['tgt'].size(),
+                                            label_smoothing=opt.label_smoothing,
+                                            mirror=opt.mirror_loss,
+                                            fast_xentropy=opt.fast_xentropy)
+            else:
+                vocab_sizes = dict()
+                for lang in dicts['langs']:
+                    if lang in dicts:
+                        vocab_sizes[dicts['langs'][lang]] = dicts[lang].size()
+                    else:
+                        vocab_sizes[dicts['langs'][lang]] = 0
+                loss_function = NMTLossFunc(opt.model_size, vocab_sizes,
+                                            label_smoothing=opt.label_smoothing,
+                                            mirror=opt.mirror_loss,
+                                            fast_xentropy=opt.fast_xentropy)
 
         # This function replaces modules with the more optimized counterparts so that it can run faster
         # Currently exp with LayerNorm

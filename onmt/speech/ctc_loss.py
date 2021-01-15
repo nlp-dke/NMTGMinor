@@ -4,15 +4,16 @@ import six
 import torch
 import torch.nn.functional as F
 import onmt
+import logging
 
 
 class CTC(torch.nn.Module):
 
-    def __init__(self, vocab_size, hidden_size, dropout_rate, ctc_type="builtin", reduce=True):
+    def __init__(self, dropout_rate, ctc_type="builtin", reduce=True):
         super().__init__()
 
-        self.vocab_size = vocab_size
-        self.hidden_size = hidden_size
+        # self.vocab_size = vocab_size
+        # self.hidden_size = hidden_size
         self.padding_idx = onmt.constants.PAD
 
         # why do we need dropout at ctc ?

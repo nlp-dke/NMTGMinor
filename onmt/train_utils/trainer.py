@@ -303,7 +303,7 @@ class XETrainer(BaseTrainer):
 
         if opt.ctc_loss != 0:
             from onmt.speech.ctc_loss import CTC
-            self.ctc_loss_function = CTC(dicts['tgt'].size(), opt.model_size, 0.0, reduce=True)
+            self.ctc_loss_function = CTC(0.0, reduce=True)
 
         if self.cuda:
             torch.cuda.set_device(self.opt.gpus[0])

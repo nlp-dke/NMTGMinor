@@ -219,11 +219,11 @@ class Dict(object):
                     self.add(random_string)
                     self.frequencies[random_string] = 0
                     break
-
-        # All elements should be false (so masked_fill_ won't touch)
-        # The new elements added should be True
-        self.vocab_mask = torch.BoolTensor(self.size()).fill_(True)
-        self.vocab_mask.narrow(0, 0, original_size).fill_(False)
+        #
+        # # All elements should be false (so masked_fill_ won't touch)
+        # # The new elements added should be True
+        # self.vocab_mask = torch.BoolTensor(self.size()).fill_(True)
+        # self.vocab_mask.narrow(0, 0, original_size).fill_(False)
 
         print("Vocabulary size after patching: %d" % self.size())
 

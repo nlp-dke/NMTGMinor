@@ -13,7 +13,8 @@ class MFWEncdecMultiheadAttn(nn.Module):
     """
 
     def __init__(self, num_heads, embed_dim, attn_drop=0.,
-                 n_languages=1, rank=1, use_multiplicative=False, weight_drop=0.0, mfw_activation="none"):
+                 n_languages=1, rank=1, use_multiplicative=False,
+                 weight_drop=0.0, mfw_activation="none", mfw_normalize=False):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -24,6 +25,7 @@ class MFWEncdecMultiheadAttn(nn.Module):
         self.scaling = self.head_dim ** -0.5  # this value is hardcoded in the "fast" implementation
         self.use_multiplicative = use_multiplicative
         self.weight_drop = weight_drop
+        self.mfw_normalize = mfw_normalize
 
         self.in_proj_weight_q = Parameter(torch.Tensor(embed_dim, embed_dim))
         self.in_proj_weight_kv = Parameter(torch.Tensor(2 * embed_dim, embed_dim))
@@ -87,19 +89,28 @@ class MFWEncdecMultiheadAttn(nn.Module):
         nn.init.normal_(self.s_o, 0.0, 0.02)
 
         if self.use_multiplicative:
-            # nn.init.normal_(self.rm_q, 0.0, 1)
-            # nn.init.normal_(self.sm_q, 0.0, 1)
-            # nn.init.normal_(self.rm_kv, 0.0, 1)
-            # nn.init.normal_(self.sm_kv, 0.0, 1)
-            # nn.init.normal_(self.rm_o, 0.0, 1)
-            # nn.init.normal_(self.sm_o, 0.0, 1)
-            with torch.no_grad():
-                self.rm_q.bernoulli_(0.5).mul_(-2).add_(1)
-                self.sm_q.bernoulli_(0.5).mul_(-2).add_(1)
-                self.rm_kv.bernoulli_(0.5).mul_(-2).add_(1)
-                self.sm_kv.bernoulli_(0.5).mul_(-2).add_(1)
-                self.rm_o.bernoulli_(0.5).mul_(-2).add_(1)
-                self.sm_o.bernoulli_(0.5).mul_(-2).add_(1)
+            std = 1
+            # nn.init.normal_(self.rm_q, 0.0, std)
+            # nn.init.normal_(self.sm_q, 0.0, std)
+            # nn.init.normal_(self.rm_kv, 0.0, std)
+            # nn.init.normal_(self.sm_kv, 0.0, std)
+            # nn.init.normal_(self.rm_o, 0.0, std)
+            # nn.init.normal_(self.sm_o, 0.0, std)
+
+            nn.init.constant_(self.rm_q, 1.0)
+            nn.init.constant_(self.sm_q, 1.0)
+            nn.init.constant_(self.rm_kv, 1.0)
+            nn.init.constant_(self.sm_kv, 1.0)
+            nn.init.constant_(self.rm_o, 1.0)
+            nn.init.constant_(self.sm_o, 1.0)
+
+            # with torch.no_grad():
+            #     self.rm_q.bernoulli_(0.5).mul_(-2).add_(1)
+            #     self.sm_q.bernoulli_(0.5).mul_(-2).add_(1)
+            #     self.rm_kv.bernoulli_(0.5).mul_(-2).add_(1)
+            #     self.sm_kv.bernoulli_(0.5).mul_(-2).add_(1)
+            #     self.rm_o.bernoulli_(0.5).mul_(-2).add_(1)
+            #     self.sm_o.bernoulli_(0.5).mul_(-2).add_(1)
 
     def forward(self, query, key, value, src_indices=None, tgt_indices=None, attn_mask=None,
                 incremental=False, incremental_cache=None):
@@ -139,9 +150,19 @@ class MFWEncdecMultiheadAttn(nn.Module):
             rm_o = torch.index_select(self.rm_o, 0, indices).squeeze(0)
             sm_o = torch.index_select(self.sm_o, 0, src_indices).squeeze(0)
 
-            in_proj_weight_q = in_proj_weight_q * torch.bmm(rm_q.unsqueeze(-1), sm_q.unsqueeze(1)).sum(dim=0)
-            in_proj_weight_kv = in_proj_weight_kv * torch.bmm(rm_kv.unsqueeze(-1), sm_kv.unsqueeze(1)).sum(dim=0)
-            out_proj_weight = out_proj_weight * torch.bmm(rm_o.unsqueeze(-1), sm_o.unsqueeze(1)).sum(dim=0)
+            scale_q = torch.bmm(rm_q.unsqueeze(-1), sm_q.unsqueeze(1)).sum(dim=0)
+            scale_kv = torch.bmm(rm_kv.unsqueeze(-1), sm_kv.unsqueeze(1)).sum(dim=0)
+            scale_out = torch.bmm(rm_o.unsqueeze(-1), sm_o.unsqueeze(1)).sum(dim=0)
+
+            if self.mfw_normalize:
+                eps = 1e-5
+                scale_q.div_(torch.norm(in_proj_weight_q) + eps)
+                scale_kv.div_(torch.norm(in_proj_weight_kv) + eps)
+                scale_out.div_(torch.norm(out_proj_weight) + eps)
+
+            in_proj_weight_q = in_proj_weight_q * scale_q
+            in_proj_weight_kv = in_proj_weight_kv * scale_kv
+            out_proj_weight = out_proj_weight * scale_out
 
         # adding main weights with extra weights
         # sum(dim=0) sums over the rank dimension
@@ -159,6 +180,18 @@ class MFWEncdecMultiheadAttn(nn.Module):
             in_proj_weight_q = F.silu(in_proj_weight_q)
             in_proj_weight_kv = F.silu(in_proj_weight_kv)
             out_proj_weight = F.silu(out_proj_weight)
+        elif self.mfw_activation == "tanh":
+            in_proj_weight_q = torch.tanh(in_proj_weight_q)
+            in_proj_weight_kv = torch.tanh(in_proj_weight_kv)
+            out_proj_weight = torch.tanh(out_proj_weight)
+        elif self.mfw_activation == "sigmoid":
+            in_proj_weight_q = torch.sigmoid(in_proj_weight_q)
+            in_proj_weight_kv = torch.sigmoid(in_proj_weight_kv)
+            out_proj_weight = torch.sigmoid(out_proj_weight)
+        elif self.mfw_activation == "relu":
+            in_proj_weight_q = torch.relu(in_proj_weight_q)
+            in_proj_weight_kv = torch.relu(in_proj_weight_kv)
+            out_proj_weight = torch.relu(out_proj_weight)
         else:
             raise NotImplementedError
 
