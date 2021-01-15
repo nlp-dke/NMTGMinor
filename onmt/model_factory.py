@@ -98,6 +98,9 @@ def build_tm_model(opt, dicts):
             embedding_tgt = nn.Embedding(dicts['tgt'].size(),
                                          opt.model_size,
                                          padding_idx=onmt.constants.PAD)
+
+        generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
+                                                          fix_norm=opt.fix_norm_output_embedding)]
     else:
         # for multi embedding
         assert opt.encoder_type == "audio", "Currently multi-embedding only supports multiASR"
@@ -125,8 +128,6 @@ def build_tm_model(opt, dicts):
         #     generators.append(ctc_generator)
         #
         # #     generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size()))
-        # # generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
-        # #                                                  fix_norm=opt.fix_norm_output_embedding)]
 
     if opt.use_language_embedding:
         print("* Create language embeddings with %d languages" % len(dicts['langs']))

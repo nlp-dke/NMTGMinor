@@ -78,7 +78,7 @@ class CrossEntropyLossBase(_Loss):
             assert tgt_lang is not None, "A language ID is required for this softmax"
             vocab_size = self.output_size[tgt_lang.item()]
         else:
-            vocab_size = self.vocab_size
+            vocab_size = self.output_size
 
         smoothing_value = self.label_smoothing / vocab_size
 

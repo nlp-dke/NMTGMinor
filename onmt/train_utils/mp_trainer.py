@@ -20,7 +20,7 @@ from onmt.data.multidata_iterator import MultiDataIterator
 from onmt.data.dataset import rewrap
 from onmt.model_factory import build_model, build_language_model, optimize_model
 from onmt.model_factory import init_model_parameters
-from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc
+from onmt.modules.loss import NMTLossFunc
 from onmt.train_utils.stats import Logger
 from onmt.utils import checkpoint_paths, normalize_gradients
 from onmt.model_factory import build_model, optimize_model, init_model_parameters
@@ -197,7 +197,7 @@ class Trainer(object):
             """ Building the loss function """
             if opt.ctc_loss > 0.0:
                 from onmt.speech.ctc_loss import CTC
-                self.ctc_loss_function = CTC(dicts['tgt'].size(), opt.model_size, 0.0, reduce=True)
+                self.ctc_loss_function = CTC(0.0, reduce=True)
 
             if opt.nce:
                 from onmt.modules.nce.nce_loss import NCELoss

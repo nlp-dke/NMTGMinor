@@ -9,7 +9,7 @@ import time, datetime
 from onmt.train_utils.trainer import XETrainer
 from onmt.data.mmap_indexed_dataset import MMapIndexedDataset
 from onmt.data.scp_dataset import SCPIndexDataset
-from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc
+from onmt.modules.loss import NMTLossFunc
 from onmt.model_factory import build_model, optimize_model, init_model_parameters
 from onmt.bayesian_factory import build_model as build_bayesian_model
 from options import make_parser
