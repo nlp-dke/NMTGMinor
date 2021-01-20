@@ -112,8 +112,9 @@ def collect_fn(src_data, tgt_data,
             if source_pos is not None:
                 tensors['source_pos'] = source_pos.transpose(0, 1)
             tensors['src_lengths'] = torch.LongTensor(src_lengths)
+            src_lengths = tensors['src_lengths']
             tensors['src_size'] = sum(src_lengths)
-            tensors['src_lengths'] = src_lengths
+            # tensors['src_lengths'] = src_lengths
 
         else:   # source sentences have BOS and EOS appended
             tensors['source'] = source_full[1:-1]   # strip BOS and EOS to form input
@@ -123,8 +124,9 @@ def collect_fn(src_data, tgt_data,
             if source_pos is not None:
                 tensors['source_pos'] = source_pos.t().contiguous()[:-1]
 
-            tensors['src_size'] = sum([len(x) - 1 for x in src_data])
-            tensors['src_lengths'] = src_lengths
+            tensors['src_size'] = sum([len(x) - 2 for x in src_data])
+            tensors['src_lengths'] = torch.LongTensor([i - 2 for i in src_lengths])  # -2 cuz BOS and EOS
+            src_lengths = tensors['src_lengths']
 
     if tgt_data is not None:
         target_full, target_pos, tgt_lengths = merge_data(tgt_data, align_right=tgt_align_right)
@@ -140,7 +142,8 @@ def collect_fn(src_data, tgt_data,
         if target_pos is not None:
             tensors['target_pos'] = target_pos.t().contiguous()[:-1]
         tgt_size = sum([len(x) - 1 for x in tgt_data])
-        tensors['tgt_lengths'] = tgt_lengths
+        tensors['tgt_lengths'] = torch.LongTensor([i - 2 for i in tgt_lengths])
+        tgt_lengths = tensors['tgt_lengths']
     else:
         tgt_size = 0
         tensors['tgt_lengths'] = None
@@ -160,8 +163,20 @@ def collect_fn(src_data, tgt_data,
                 out_tensor[:(src_lengths[i]), i] = v + 1
 
             tensors['targets_source_lang'] = out_tensor
+
     if tgt_lang_data is not None:
         tensors['target_lang'] = torch.cat(tgt_lang_data).long()
+
+        if token_level_lang and bidirectional:  # prepare token-level language prediction targets
+            sl_ = tensors['target_lang']  # sl_.shape[0]
+            # out_dims = (max(tensors['tgt_lengths']).item(), sl_.shape[0])  # T, B
+            out_dims = (max(tgt_lengths), sl_.shape[0])
+            out_tensor = sl_.data.new(*out_dims).fill_(onmt.constants.PAD)
+            for i, v in enumerate(sl_):
+                # lan ID starts with 0, but pred label values should start with 1 (due to padding)
+                out_tensor[:(src_lengths[i]), i] = v + 1
+
+            tensors['targets_target_lang'] = out_tensor
 
     tensors['vocab_mask'] = vocab_mask
 

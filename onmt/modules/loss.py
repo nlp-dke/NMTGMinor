@@ -5,8 +5,26 @@ import torch, math
 import torch.nn.functional as F
 from torch.nn.modules.loss import _Loss
 from onmt.utils import flip
+from collections import defaultdict
 
 import numpy
+
+def tiny_value_of_dtype(dtype: torch.dtype):
+    """
+    Returns a moderately tiny value for a given PyTorch data type that is used to avoid numerical
+    issues such as division by zero.
+    This is different from `info_value_of_dtype(dtype).tiny` because it causes some NaN bugs.
+    Only supports floating point dtypes.
+    """
+    if not dtype.is_floating_point:
+        raise TypeError("Only supports floating point dtypes.")
+    if dtype == torch.float or dtype == torch.double:
+        return 1e-13
+    elif dtype == torch.half:
+        return 1e-4
+    else:
+        raise TypeError("Does not support dtype " + str(dtype))
+
 
 class CrossEntropyLossBase(_Loss):
 
@@ -321,16 +339,15 @@ class NMTAndCTCLossFunc(_Loss):
     Standard NMT Loss Computation.
     """
 
-    def __init__(self, output_size, label_smoothing=0.0, ctc_weight = 0.0):
+    def __init__(self, output_size, label_smoothing=0.0, ctc_weight=0.0):
         super(NMTAndCTCLossFunc, self).__init__(output_size)
         self.ctc_weight = ctc_weight
-        self.ce_loss = NMTLossFunc(output_size,label_smoothing)
-        self.ctc_loss = CTCLossFunc(output_size+1,label_smoothing)
+        self.ce_loss = NMTLossFunc(output_size, label_smoothing)
+        self.ctc_loss = CTCLossFunc(output_size + 1, label_smoothing)
 
     def forward(self, model_outputs, targets, model=None, backward=False, normalizer=1, **kwargs):
         """
         Args:
-
             model_outputs: a dictionary containing the predictive output from the model.
                                                       time x batch x vocab_size
                                                    or time x batch x hidden_size
@@ -340,16 +357,16 @@ class NMTAndCTCLossFunc(_Loss):
             normalizer: the denominator of the loss before backward
             **kwargs(optional): additional info for computing loss.
         """
-        ce_loss = self.ce_loss(model_outputs, targets, model,False, normalizer)
+        ce_loss = self.ce_loss(model_outputs, targets, model, False, normalizer)
         ctc_loss = self.ctc_loss(model_outputs, targets, model, False, normalizer)
 
-        loss = self.ctc_weight * ctc_loss['loss'] + (1-self.ctc_weight) * ce_loss['loss']
-        loss_data = self.ctc_weight * ctc_loss['data'] + (1-self.ctc_weight) * ce_loss['data']
+        loss = self.ctc_weight * ctc_loss['loss'] + (1 - self.ctc_weight) * ce_loss['loss']
+        loss_data = self.ctc_weight * ctc_loss['data'] + (1 - self.ctc_weight) * ce_loss['data']
 
         if not numpy.isfinite(ctc_loss['data']):
-            print("CTC_Loss:",ctc_loss['data'])
-            print("NMT_Loss:",ce_loss['data'])
-            print("Loss:",loss_data)
+            print("CTC_Loss:", ctc_loss['data'])
+            print("NMT_Loss:", ce_loss['data'])
+            print("Loss:", loss_data)
             exit()
 
         if backward:
@@ -442,3 +459,112 @@ class FusionLoss(CrossEntropyLossBase):
         output_dict = {"loss": loss, "data": loss_data}
 
         return output_dict
+
+
+class MSEEncoderLoss(_Loss):
+    def __init__(self, input_type, weight=0.0):
+        super(MSEEncoderLoss, self).__init__()
+        self.input_type = input_type
+        self.weight = weight
+
+    def forward(self, context1, context2, mask1, mask2):
+        if self.input_type == 1:    # meanpool
+            mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
+            mask2_ = mask2.permute(2, 0, 1)
+
+            masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
+
+            # meanpool_tensor = torch.sum(input_tensor.float().masked_fill(mask_, 0).type_as(input_tensor), dim=0,
+            #                             keepdim=True) / (1 - mask_.float()).sum(dim=0)
+
+            # (T, B, H) / (T, B, H)
+            input1 = torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)
+            input2 = torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)
+
+            l2_loss = (input1 - input2) ** 2
+            # multiply by seq length to make aux. loss weight comparable
+            l2_loss = l2_loss.sum() * min(context1.shape[0], context1.shape[1])
+
+        elif self.input_type == 2:  # by position
+            # (T1, B, D) --> (min(T1, T2), B, D)
+            # (T2, B, D) --> (min(T1, T2), B, D)
+            max_len1 = context1.shape[0]
+            max_len2 = context2.shape[0]
+
+            if max_len1 > max_len2:
+                input1 = context1[:max_len2, :, :]
+                input2 = context2
+            else:
+                input1 = context1
+                input2 = context2[:max_len1, :, :]
+
+            l2_loss = (input1 - input2) ** 2
+            l2_loss = l2_loss.sum()
+
+        elif self.input_type == 3:
+            input1, _ = torch.max(context1, dim=0)     # (T1, B, D) --> (B, D)
+            input2, _ = torch.max(context2, dim=0)     # (T2, B, D) --> (B, D)
+
+            l2_loss = (input1 - input2) ** 2
+            # multiply by seq length to make aux. loss weight comparable
+            l2_loss = l2_loss.sum() * min(context1.shape[0], context1.shape[1])
+
+        elif self.input_type == 4:
+            # (T1, B, D) --> (T1, B, D'). Start with D'= D/2
+            # (T2, B, D) --> (T2, B, D')
+            # (T1, B, D) --> (min(T1, T2), B, D)
+            # (T2, B, D) --> (min(T1, T2), B, D)
+            max_len1 = context1.shape[0]
+            max_len2 = context2.shape[0]
+            lan_inv_emb_dim = context1.shape[2] // 2
+
+            if max_len1 > max_len2:
+                input1 = context1[:max_len2, :, :lan_inv_emb_dim]
+                input2 = context2[:, :, :lan_inv_emb_dim]
+            else:
+                input1 = context1[:, :, :lan_inv_emb_dim]
+                input2 = context2[:max_len1, :, :lan_inv_emb_dim]
+
+            l2_loss = (input1 - input2) ** 2
+            # multiply by seq length to make aux. loss weight comparable
+            l2_loss = l2_loss.sum() * 2
+        elif self.input_type == 5:      # meanpool + position by position
+            mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
+            mask2_ = mask2.permute(2, 0, 1)
+
+            masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
+
+            # (T, B, H) / (T, B, H)
+            input1 = torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)
+            input2 = torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)
+
+            l2_loss = (input1 - input2) ** 2
+            l2_loss = l2_loss.sum() * min(context1.shape[0], context1.shape[1])
+
+            # (T1, B, D) --> (min(T1, T2), B, D)
+            # (T2, B, D) --> (min(T1, T2), B, D)
+            max_len1 = context1.shape[0]
+            max_len2 = context2.shape[0]
+
+            if max_len1 > max_len2:
+                input1 = context1[:max_len2, :, :]
+                input2 = context2
+            else:
+                input1 = context1
+                input2 = context2[:max_len1, :, :]
+
+            l2_loss += ((input1 - input2) ** 2).sum()
+            l2_loss /= 2.0
+
+        else:
+            raise NotImplementedError
+
+        l2_loss = l2_loss * self.weight
+
+        output = defaultdict(lambda: None)
+        output['loss'] = l2_loss
+        output['data'] = l2_loss.item()
+
+        return output

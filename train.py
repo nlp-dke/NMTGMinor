@@ -6,8 +6,9 @@ import onmt.modules
 import argparse
 import torch
 import time, datetime
-from onmt.train_utils.trainer import XETrainer, XEAdversarialTrainer
-from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc
+from onmt.train_utils.trainer import XETrainer
+from onmt.train_utils.trainer_zoo import XEAdversarialTrainer
+from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc, MSEEncoderLoss
 from onmt.model_factory import build_model, optimize_model
 from options import make_parser
 from collections import defaultdict
@@ -320,10 +321,14 @@ def main():
         model = build_model(opt, dicts)
 
         """ Building the loss function """
-        if opt.ctc_loss != 0:
-            loss_function = NMTAndCTCLossFunc(dicts['tgt'].size(),
-                                              label_smoothing=opt.label_smoothing,
-                                              ctc_weight=opt.ctc_loss)
+
+        if opt.ctc_loss > 0.0:
+            from onmt.speech.ctc_loss import CTC
+            loss_function = CTC(dicts['tgt'].size(), opt.model_size, 0.0, reduce=True)
+        # if opt.ctc_loss != 0:
+        #     loss_function = NMTAndCTCLossFunc(dicts['tgt'].size(),
+        #                                       label_smoothing=opt.label_smoothing,
+        #                                       ctc_weight=opt.ctc_loss)
         else:
             loss_function = NMTLossFunc(opt.model_size, dicts['tgt'].size(),
                                         label_smoothing=opt.label_smoothing,
@@ -341,6 +346,18 @@ def main():
 
         loss_function = FusionLoss(dicts['tgt'].size(), label_smoothing=opt.label_smoothing)
 
+    if opt.sim_loss_type:
+        sim_loss_input_type = opt.sim_loss_type % 10
+        sim_loss_func_type = opt.sim_loss_type // 10
+        aux_loss_weight = opt.aux_loss_weight
+
+        if sim_loss_func_type == 1:
+            aux_loss_function = MSEEncoderLoss(input_type=sim_loss_input_type, weight=aux_loss_weight)
+        else:
+            raise NotImplementedError
+    else:
+        aux_loss_function = None
+
     n_params = sum([p.nelement() for p in model.parameters()])
     print('* number of parameters: %d' % n_params)
 
@@ -348,7 +365,7 @@ def main():
         raise NotImplementedError("Multi-GPU training is not supported at the moment.")
     else:
         if not opt.adversarial_classifier:
-            trainer = XETrainer(model, loss_function, train_data, valid_data, dicts, opt)
+            trainer = XETrainer(model, loss_function, train_data, valid_data, dicts, opt, True, aux_loss_function)
         else:
             trainer = XEAdversarialTrainer(model, loss_function, train_data, valid_data, dicts, opt)
 

@@ -21,11 +21,11 @@ class Generator(nn.Module):
         self.linear.bias.data.zero_()
 
     # def forward(self, input, log_softmax=True):
-    def forward(self, output_dicts):
+    def forward(self, output_dicts, input_name='hidden'):
 
-        input = output_dicts['hidden']
+        input = output_dicts[input_name]
         fix_norm = self.fix_norm
-        target_mask = output_dicts['target_mask']
+        # target_mask = output_dicts['target_mask']   # commented out since it's not used
 
         # TODO: only compute the softmax for the masked parts to save computation?
 
@@ -44,11 +44,12 @@ class Generator(nn.Module):
 
 class NMTModel(nn.Module):
 
-    def __init__(self, encoder, decoder, generator=None):
+    def __init__(self, encoder, decoder, generator=None, ctc=None):
         super(NMTModel, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.generator = generator
+        self.ctc = ctc
 
     def tie_weights(self):
         assert self.generator is not None, "The generator needs to be created before sharing weights"
