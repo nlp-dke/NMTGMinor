@@ -26,8 +26,10 @@ from onmt.train_utils.stats import Logger
 from onmt.utils import checkpoint_paths, normalize_gradients
 from onmt.model_factory import build_model, optimize_model, init_model_parameters
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP_model
-from torch.cuda.amp import autocast
+from apex import amp
+from apex.parallel import DistributedDataParallel as DDP
+# from torch.nn.parallel import DistributedDataParallel as DDP_model
+# from torch.cuda.amp import autocast
 import warnings
 
 # ignore the pytorch -> numpy conversion warnings
@@ -57,26 +59,28 @@ def prepare_sample(batch, device=None):
 
 
 def generate_data_iterator(dataset, rank, world_size, seed,
-                           num_workers=1, epoch=1., buffer_size=0, fill_value=True):
+                           num_workers=1, epoch=1., buffer_size=0):
     # check if dataset is a list:
     if isinstance(dataset, list):
         # this is a multidataset
         data_iterator = MultiDataIterator(dataset, seed=seed, num_workers=num_workers,
                                           epoch=epoch, buffer_size=buffer_size,
-                                          num_shards=world_size, shard_id=rank, fill_value=fill_value)
+                                          num_shards=world_size, shard_id=rank)
     else:
         data_iterator = DataIterator(dataset, dataset.collater, dataset.batches, seed=seed,
                                      num_workers=num_workers, epoch=epoch, buffer_size=buffer_size,
-                                     num_shards=world_size, shard_id=rank, fill_value=fill_value)
+                                     num_shards=world_size, shard_id=rank)
 
     return data_iterator
 
 
 def zero_tensor(device=None):
+    tensor = torch.Tensor([0]).zero_()
+
     if device is None:
-        return torch.Tensor([0]).cuda()
+        return tensor.cuda()
     else:
-        return torch.Tensor([0]).to(device)
+        return tensor.to(device)
 
 
 def all_reduce_and_rescale_tensors(tensors, rescale_denom,
@@ -219,13 +223,9 @@ class Trainer(object):
         init_model_parameters(model, opt)
         self.model = model
         self.loss_function = loss_function
-        self.grad_scaler = torch.cuda.amp.GradScaler()
+        # self.grad_scaler = torch.cuda.amp.GradScaler()
 
-        if opt.load_from:
-            checkpoint = torch.load(opt.load_from, map_location=lambda storage, loc: storage)
-            self.model.load_state_dict(checkpoint['model'])
-            if 'scaler' in checkpoint and checkpoint['scaler'] is not None:
-                self.grad_scaler.load_state_dict(checkpoint['scaler'])
+
 
         if self.cuda:
             torch.cuda.set_device(self.device)
@@ -254,6 +254,20 @@ class Trainer(object):
             #     params = [p for p in self.model.parameters()]
             #     all_reduce_and_rescale_tensors(params, 1)
 
+        if self.cuda:
+            self.model, self.optim.optimizer = amp.initialize(self.model,
+                                                              self.optim.optimizer,
+                                                              opt_level=opt_level,
+                                                              keep_batchnorm_fp32=keep_batchnorm_fp32,
+                                                              loss_scale="dynamic",
+                                                              verbosity=1 if self.opt.verbose else 0)
+
+        if opt.load_from:
+            checkpoint = torch.load(opt.load_from, map_location=lambda storage, loc: storage)
+            self.model.load_state_dict(checkpoint['model'])
+            if 'scaler' in checkpoint and checkpoint['scaler'] is not None:
+                self.grad_scaler.load_state_dict(checkpoint['scaler'])
+
         if setup_optimizer:
 
             self.optim = onmt.Optim(opt)
@@ -269,11 +283,10 @@ class Trainer(object):
         if self.world_size > 1:
             # find_unused_parameters may be required for dropped layer (parameters that are not connected to
             # any particular graph)
-            find_unused_parameters = True
+            # find_unused_parameters = True
 
-            self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.rank],
-                                                                   output_device=self.rank,
-                                                                   find_unused_parameters=find_unused_parameters)
+            self.model = torch.nn.parallel.DistributedDataParallel(self.model, delay_allreduce=True,
+                                                                   gradient_average=False)
 
         print("[INFO] Process %d ready." % self.rank, flush=True)
 
@@ -548,10 +561,8 @@ class Trainer(object):
         world_size = self.world_size
 
         # the data iterator creates an epoch iterator
-        # for eval, we use false fill_value
         data_iterator = generate_data_iterator(data, rank, world_size, seed=self.opt.seed,
-                                               num_workers=opt.num_workers, epoch=1, buffer_size=opt.buffer_size,
-                                               fill_value=False)
+                                               num_workers=opt.num_workers, epoch=1, buffer_size=opt.buffer_size)
         epoch_iterator = data_iterator.next_epoch_itr(False, pin_memory=False)
 
         data_size = len(epoch_iterator)
@@ -582,9 +593,8 @@ class Trainer(object):
                                              mirror=opt.mirror_loss, streaming_state=streaming_state, nce=opt.nce)
 
                         outputs['tgt_mask'] = tgt_mask
-                        with autocast(enabled=False):
-                            loss_dict = self.loss_function(outputs, targets, model=self.model, eval=True)
-                            loss_data = loss_dict['data']
+                        loss_dict = self.loss_function(outputs, targets, model=self.model, eval=True)
+                        loss_data = loss_dict['data']
 
                     total_loss.add_(loss_data)
                     total_words.add_(batch.tgt_size)
@@ -605,6 +615,9 @@ class Trainer(object):
         opt = self.opt
         train_data = self.train_data
         streaming = opt.streaming
+
+        self.model.train()
+        self.loss_function.train()
 
         # Clear the gradients of the model
         self.model.zero_grad()
@@ -672,12 +685,12 @@ class Trainer(object):
                 reduction_disabled = False if counter >= opt.update_frequency or i == (n_samples - 1) else True
 
                 def maybe_no_sync():
-                    # if not reduction_disabled and isinstance(self.model, DDP_model):
-                    #     return self.model.no_sync()
-                    # else:
-                    #     # when we dont reach the updating step, we do not need to synchronize the gradients
-                    #     # thus disabling the backward grad sync to improve speed
-                    return contextlib.ExitStack()  # dummy contextmanager
+                    if not reduction_disabled and isinstance(self.model, DDP_model):
+                        return self.model.no_sync()
+                    else:
+                        # when we dont reach the updating step, we do not need to synchronize the gradients
+                        # thus disabling the backward grad sync to improve speed
+                        return contextlib.ExitStack()  # dummy contextmanager
 
                 with maybe_no_sync():
                     with autocast():
@@ -691,16 +704,13 @@ class Trainer(object):
                         batch_size = batch.size
                         outputs['tgt_mask'] = tgt_mask
 
-                        # Loss functions must be computed in FP32 regions
-                        with autocast(enabled=False):
-                            loss_dict = self.loss_function(outputs, targets, model=self.model)
+                        loss_dict = self.loss_function(outputs, targets, model=self.model)
                         loss_data = loss_dict['data']
                         loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
                         full_loss = loss
 
                         if opt.ctc_loss > 0.0:
-                            with autocast(enabled=False):
-                                ctc_loss = self.ctc_loss_function(outputs, targets)
+                            ctc_loss = self.ctc_loss_function(outputs, targets)
                             ctc_loss_data = ctc_loss.item()
                             full_loss = full_loss + opt.ctc_loss * ctc_loss
 
@@ -820,14 +830,12 @@ class Trainer(object):
                 # we rescale the model parameters w.r.t the world size
                 grad_denom = grad_denom / self.world_size
 
-                self.grad_scaler.unscale_(self.optim.optimizer)
-
                 # When we accumulate the gradients, each gradient is already normalized by a constant grad_scaler
                 normalize_gradients(self.model.parameters(), grad_denom)
 
                 # Update the parameters.
                 if self.opt.max_grad_norm > 0:
-                    # self.grad_scaler.unscale_(self.optim.optimizer)
+                    self.grad_scaler.unscale_(self.optim.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt.max_grad_norm)
 
                 self.optim.step(scaler=self.grad_scaler)

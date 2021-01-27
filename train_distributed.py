@@ -209,6 +209,7 @@ def main():
                                           multiplier=opt.batch_size_multiplier,
                                           src_align_right=opt.src_align_right,
                                           upsampling=opt.upsampling,
+                                          augment=opt.augment_speech,
                                           cleaning=True, verbose=True,
                                           num_split=1)
             else:
@@ -343,6 +344,7 @@ def main():
                                               multiplier=opt.batch_size_multiplier,
                                               src_align_right=opt.src_align_right,
                                               upsampling=opt.upsampling,
+                                              augment=opt.augment_speech,
                                               cleaning=True, verbose=True,
                                               num_split=1)
 

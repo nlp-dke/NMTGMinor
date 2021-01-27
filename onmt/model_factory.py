@@ -79,8 +79,8 @@ def build_tm_model(opt, dicts):
             generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
                                                               fix_norm=opt.fix_norm_output_embedding)]
 
-            if opt.ctc_loss != 0:
-                generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size()))
+            # if opt.ctc_loss != 0:
+            #     generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size()))
 
     # BUILD EMBEDDINGS
     if not opt.multi_embedding:
@@ -101,6 +101,11 @@ def build_tm_model(opt, dicts):
 
         generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
                                                           fix_norm=opt.fix_norm_output_embedding)]
+
+        # THIS IS CURRENTLY A BUG - (THIS WEIGHT GROUP DOES NOT DO ANYTHING).
+        # THE CODE IS HERE TO PROPERLY LOAD PREVIOUSLY TRAINED CTC MODEL
+        if opt.ctc_loss != 0:
+            generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size() + 1))
     else:
         # for multi embedding
         assert opt.encoder_type == "audio", "Currently multi-embedding only supports multiASR"

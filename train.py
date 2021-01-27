@@ -500,8 +500,6 @@ def main():
         print("MultiGPU is not supported by this train.py. Use train_distributed.py with the same arguments "
               "for MultiGPU training")
         raise NotImplementedError
-        # from onmt.train_utils.new_trainer import Trainer
-        # trainer = Trainer(model, loss_function, train_data, valid_data, dicts, opt)
 
     trainer.run(checkpoint=checkpoint)
 

@@ -192,6 +192,8 @@ def make_parser(parser):
                         help="""Number of steps to increase the lr in noam""")
     parser.add_argument('-max_steps', type=int, default=100000,
                         help="""Number of steps to train the model""")
+    parser.add_argument('-starting_step', type=int, default=-1,
+                        help="""Override the steps in the optim to this step""")
     parser.add_argument('-noam_step_interval', type=int, default=1,
                         help="""How many steps before updating the parameters""")
     parser.add_argument('-max_step', type=int, default=40000,
@@ -280,6 +282,8 @@ def make_parser(parser):
     parser.add_argument('-zero_encoder', action='store_true',
                         help='Zero-out encoders during training')
     parser.add_argument('-ctc_loss', type=float, default=0.0,
+                        help='CTC Loss as additional loss function with this weight')
+    parser.add_argument('-override_ctc_loss', type=float, default=-1,
                         help='CTC Loss as additional loss function with this weight')
     parser.add_argument('-lfv_multilingual', action='store_true',
                         help='Use multilingual language identifier to get LFV for each language')

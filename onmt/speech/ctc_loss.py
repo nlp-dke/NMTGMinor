@@ -31,7 +31,8 @@ class CTC(torch.nn.Module):
 
         if self.ctc_type == "builtin":
             reduction_type = "sum" if reduce else "none"
-            self.ctc_loss = torch.nn.CTCLoss(blank=onmt.constants.PAD, reduction=reduction_type, zero_infinity=True)
+            self.ctc_loss = torch.nn.CTCLoss(blank=onmt.constants.PAD,
+                                             reduction=reduction_type, zero_infinity=True)
 
         elif self.ctc_type == "warpctc":
             import warpctc_pytorch as warp_ctc
@@ -56,7 +57,7 @@ class CTC(torch.nn.Module):
         """
 
         if self.ctc_type == "builtin":
-            log_probs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+            log_probs = F.log_softmax(logits.float(), dim=-1)
 
             # Use the deterministic CuDNN implementation of CTC loss to avoid
             #  [issue#17798](https://github.com/pytorch/pytorch/issues/17798)

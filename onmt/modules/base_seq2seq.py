@@ -107,6 +107,16 @@ class NMTModel(nn.Module):
             if k not in filtered:
                 filtered[k] = v
 
+        # for backward compatibility: only load parameters that exist in the model
+        # there is a bug in the ctc model that created 2 softmax output layer and 1 was not used
+        del_list = list()
+        for k,v in filtered.items():
+            if k not in model_dict:
+                del_list.append(k)
+
+        for k in del_list:
+            filtered.pop(k, None)
+
         super().load_state_dict(filtered)   
 
         # in case using multiple generators

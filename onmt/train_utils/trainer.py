@@ -21,8 +21,6 @@ from onmt.model_factory import init_model_parameters
 from onmt.train_utils.stats import Logger
 from onmt.utils import checkpoint_paths, normalize_gradients
 
-from onmt.multiprocessing.multiprocessing_wrapper import MultiprocessingRunner
-
 
 def varname(p):
     for line in inspect.getframeinfo(inspect.currentframe().f_back)[3]:
@@ -557,13 +555,13 @@ class XETrainer(BaseTrainer):
                     rec_loss_data = loss_dict['rec_loss_data']
                 else:
                     rec_loss_data = None
-
-                if opt.lfv_multilingual:
-                    lid_logits = outputs['lid_logits']
-                    lid_labels = batch.get('target_lang')
-                    lid_loss_function = self.loss_function.get_loss_function('lid_loss')
-                    lid_loss = lid_loss_function(lid_logits, lid_labels)
-                    full_loss = full_loss + lid_loss
+                #
+                # if opt.lfv_multilingual:
+                #     lid_logits = outputs['lid_logits']
+                #     lid_labels = batch.get('target_lang')
+                #     lid_loss_function = self.loss_function.get_loss_function('lid_loss')
+                #     lid_loss = lid_loss_function(lid_logits, lid_labels)
+                #     full_loss = full_loss + lid_loss
 
                 optimizer = self.optim.optimizer
 
@@ -602,6 +600,7 @@ class XETrainer(BaseTrainer):
                 if nan_counter >= 15:
                     raise ValueError("Training stopped because of multiple NaN occurence. "
                                      "For ASR, using the Relative Transformer is more stable and recommended.")
+                counter = 0
             else:
                 nan_counter = 0
 
@@ -690,9 +689,6 @@ class XETrainer(BaseTrainer):
                                     report_tgt_words / (time.time() - start)))
 
                     if opt.ctc_loss > 0.0:
-                        # if torch.isinf(report_ctc_loss):
-                        #     report_ctc_loss.zero_()
-                        # dist.all_reduce(report_ctc_loss, op=dist.ReduceOp.SUM, group=self.group)
                         ctc_loss = report_ctc_loss / report_tgt_words
                         log_string += (" ctcloss: %8.2f ; " % ctc_loss)
 
@@ -772,6 +768,12 @@ class XETrainer(BaseTrainer):
             print('Validation perplexity: %g' % valid_ppl)
 
         self.start_time = time.time()
+
+        if opt.starting_step > 0:
+            self.optim.override_starting_step(opt.starting_step)
+
+        if opt.override_ctc_loss >= 0:
+            opt.ctc_loss = opt.override_ctc_loss
 
         for epoch in range(start_epoch, start_epoch + opt.epochs):
             print('')

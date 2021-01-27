@@ -9,6 +9,7 @@ import os
 import queue
 import time
 from threading import Thread
+import random
 
 import numpy as np
 import torch
@@ -128,7 +129,7 @@ dataset (~torch.utils.data.Dataset)
 class DataIterator(EpochBatchIterating):
 
     def __init__(self, dataset, collate_fn, batch_sampler, seed=1, num_workers=0,
-                 epoch=1, buffer_size=0, timeout=0, num_shards=1, shard_id=0, fill_value=None):
+                 epoch=1, buffer_size=0, timeout=0, num_shards=1, shard_id=0, fill_value=True):
         """
         :param dataset:
         :param collate_fn:
@@ -254,7 +255,9 @@ class DataIterator(EpochBatchIterating):
             batches = self.frozen_batches
 
         num_shards = self.num_shards
-        batches = list(ShardedIterator(batches, num_shards, self.shard_id, fill_value=batches[0]))
+
+        fill_batch = random.choice(batches) if self.fill_value else None
+        batches = list(ShardedIterator(batches, num_shards, self.shard_id, fill_value=fill_batch))
 
         # catch the exception when the data is so small that one iterator is completely empty
         if batches[0] is None:
@@ -262,6 +265,10 @@ class DataIterator(EpochBatchIterating):
             print("This iterator is empty")
         else:
             empty = False
+
+        # remove the last element if None
+        if batches[-1] is None:
+            batches.pop()
 
         if offset > 0 and offset >= len(batches):
             return None
@@ -312,6 +319,7 @@ class ShardedIterator(CountingIterator):
         # first islice takes a list of minibatch-ids from shard_id to max, every num_shards
         # next, zip_longest takes the zip between (0, 1, ... n) and the minibatches (longest, fill the latter with [])
         # next, map will apply the function taking the minibatches to return the iterator
+
         itr = map(
             operator.itemgetter(1),
             itertools.zip_longest(
@@ -320,6 +328,7 @@ class ShardedIterator(CountingIterator):
                 fillvalue=fill_value,
             ),
         )
+
         super().__init__(
             itr,
             start=int(math.ceil(getattr(iterable, 'n', 0) / float(num_shards))),

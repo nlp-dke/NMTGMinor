@@ -426,7 +426,7 @@ class Optim(object):
             print("* Using Cosine learning rate schedule")
             self.scheduler = None
             self.eta_min = 0.0
-            self.max_step = opt.max_step if hasattr(opt, 'max_step') else 33333
+            self.max_step = opt.max_step if hasattr(opt, 'max_step') else 1e6
             self.init_lr = self.lr
         else:
             self.init_lr = self.lr
@@ -539,9 +539,14 @@ class Optim(object):
         self._step = state_dict['_step']
         self._first_step = self._step
         print("* Loading from step %d " % self._step)
-
+        state_dict['step'] = self._step
         state_dict.pop('_step', None)
+
         self.optimizer.load_state_dict(state_dict)
+
+    def override_starting_step(self, step):
+        self._step = step
+        self._first_step = self._step
 
     def zero_grad(self):
         self.optimizer.zero_grad()
