@@ -259,10 +259,10 @@ class RelativeTransformerEncoderLayer(nn.Module):
             if self.multilingual_adapter:
                 input = self.adapters(input, src_lang)
 
-            # checking for inf/nan which can happen randomly in fp16 ...
-            if torch.isinf(input).any() or torch.isnan(input).any():
-                clamp_value = torch.finfo(input.dtype).max - 1000
-                input.clamp_(min=-clamp_value, max=clamp_value)
+            # # checking for inf/nan which can happen randomly in fp16 ...
+            # if torch.isinf(input).any() or torch.isnan(input).any():
+            #     clamp_value = torch.finfo(input.dtype).max - 1000
+            #     input.clamp_(min=-clamp_value, max=clamp_value)
 
         if incremental:
             return input, incremental_cache
@@ -446,9 +446,9 @@ class RelativeTransformerDecoderLayer(nn.Module):
                 input = self.adapters(input, tgt_lang)
 
             # checking for inf/nan which can happen randomly in fp16 ...
-            if torch.isinf(input).any() or torch.isnan(input).any():
-                clamp_value = torch.finfo(input.dtype).max - 1000
-                input.clamp_(min=-clamp_value, max=clamp_value)
+            # if torch.isinf(input).any() or torch.isnan(input).any():
+            #     clamp_value = torch.finfo(input.dtype).max - 1000
+            #     input.clamp_(min=-clamp_value, max=clamp_value)
         else:
             coverage = None
             lid_logits = None

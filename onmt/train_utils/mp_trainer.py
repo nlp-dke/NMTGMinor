@@ -643,12 +643,13 @@ class Trainer(object):
         else:
             streaming_state = None
 
+        # i = number of yielded items from the dataset at the moment
         i = data_iterator.iterations_in_epoch if not isinstance(train_data, list) else epoch_iterator.n_yielded
-        i = i * self.world_size
+        # i = i * self.world_size  #
 
         while not data_iterator.end_of_epoch():
 
-            curriculum = (epoch < opt.curriculum)
+            # curriculum = (epoch < opt.curriculum)
 
             # this batch generator is not very clean atm
             # TODO: move everything to the multiGPU trainer
@@ -809,25 +810,25 @@ class Trainer(object):
             if update_flag:
                 # accumulated gradient case, in this case the update frequency
                 self.all_reduce(num_accumulated_words, op=dist.ReduceOp.SUM, group=self.group)
-                self.all_reduce(nan_counter, op=dist.ReduceOp.SUM, group=self.group)
+                # self.all_reduce(nan_counter, op=dist.ReduceOp.SUM, group=self.group)
 
-                grad_denom = 1.0 / grad_div
-
-                if self.opt.normalize_gradient:
-                    grad_denom = num_accumulated_words.item() * grad_denom
+                # grad_denom = 1.0 / grad_div
+                #
+                # if self.opt.normalize_gradient:
+                #     grad_denom = num_accumulated_words.item() * grad_denom
 
                 # the gradient is scaled by world size, so in order to match the model without multiGPU
                 # we rescale the model parameters w.r.t the world size
-                grad_denom = grad_denom / self.world_size
+                # grad_denom = grad_denom / self.world_size
 
-                self.grad_scaler.unscale_(self.optim.optimizer)
+                # self.grad_scaler.unscale_(self.optim.optimizer)
 
                 # When we accumulate the gradients, each gradient is already normalized by a constant grad_scaler
-                normalize_gradients(self.model.parameters(), grad_denom)
+                # normalize_gradients(self.model.parameters(), grad_denom)
 
                 # Update the parameters.
                 if self.opt.max_grad_norm > 0:
-                    # self.grad_scaler.unscale_(self.optim.optimizer)
+                    self.grad_scaler.unscale_(self.optim.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt.max_grad_norm)
 
                 self.optim.step(scaler=self.grad_scaler)
@@ -860,8 +861,11 @@ class Trainer(object):
             # total_non_pads += batch.get('target_output').ne(onmt.constants.PAD).sum().item()
             # batch_efficiency = total_non_pads / total_tokens
 
+            # increase i by world size
+            i = i + self.world_size
+
             # control the index a little bit to ensure the log is always printed
-            if i == 0 or ((i + 1) % opt.log_interval < self.world_size):
+            if i == self.world_size or (i % opt.log_interval < self.world_size):
 
                 self.all_reduce(report_loss, op=dist.ReduceOp.SUM, group=self.group)
                 self.all_reduce(report_tgt_words, op=dist.ReduceOp.SUM, group=self.group)
@@ -871,7 +875,7 @@ class Trainer(object):
 
                 if self.is_main():
                     log_string = ("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; " %
-                                  (epoch, i + 1, len(data_iterator),
+                                  (epoch, i, len(data_iterator),
                                    math.exp(report_loss.item() / report_tgt_words.item())))
 
                     if opt.reconstruct:
@@ -911,8 +915,7 @@ class Trainer(object):
                 report_ctc_loss.zero_()
                 start = time.time()
 
-            # increase i by world size
-            i = i + self.world_size
+
 
         return total_loss / total_words
 

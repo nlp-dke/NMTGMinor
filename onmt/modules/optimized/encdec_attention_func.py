@@ -111,7 +111,10 @@ class EncdecAttnFunc(torch.autograd.Function):
 
         dtype_ = torch.float64 if double_precision else torch.float32
         softmax_results = F.softmax(matmul1_results, dim=-1, dtype=dtype_).type_as(matmul1_results)
-        # softmax_results = F.softmax(matmul1_results.float(), dim=-1).type_as(matmul1_results)
+
+        nan_mask = torch.isnan(softmax_results)
+        if nan_mask.any():
+            softmax_results.masked_fill_(nan_mask, 0)
 
         # Dropout - is not executed for inference
         if is_training:
@@ -158,7 +161,7 @@ class EncdecAttnFunc(torch.autograd.Function):
                               input_weights_q,
                               input_weights_kv,
                               output_weights,
-                              dropout_mask,
+                              dropout_mask, nan_mask,
                               dropout_prob_t)
 
         return outputs.detach(), softmax_results.detach()
@@ -171,7 +174,7 @@ class EncdecAttnFunc(torch.autograd.Function):
             , input_lin_q_results, input_lin_kv_results \
             , inputs_q, inputs_kv \
             , input_weights_q, input_weights_kv, output_weights \
-            , dropout_mask, dropout_prob_t \
+            , dropout_mask, nan_mask, dropout_prob_t \
             = ctx.saved_tensors
 
         head_dim = inputs_q.size(2) // heads_t[0]
@@ -228,6 +231,9 @@ class EncdecAttnFunc(torch.autograd.Function):
 
         # Mask and Scaling for Dropout (not a publically documented op)
         dropout_grads = torch._masked_scale(matmul2_dgrad1, dropout_mask, 1.0 / (1.0 - dropout_prob_t[0]))
+
+        if nan_mask.any():
+            dropout_grads.masked_fill_(nan_mask, 0)
 
         # Softmax Grad (not a publically documented op)
         softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, softmax_results)

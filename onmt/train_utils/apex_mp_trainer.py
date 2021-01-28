@@ -43,9 +43,10 @@ def varname(p):
             return m.group(1)
 
 
-def prepare_sample(batch, device=None):
+def prepare_sample(batch, device=None, fp16=False):
     """
     Put minibatch on the corresponding GPU
+    :param fp16:
     :param batch:
     :param device:
     :return:
@@ -53,7 +54,7 @@ def prepare_sample(batch, device=None):
     if isinstance(batch, list):
         batch = batch[0]
     batch = rewrap(batch)
-    batch.cuda(fp16=False, device=device)
+    batch.cuda(fp16=fp16, device=device)
 
     return batch
 
@@ -225,8 +226,6 @@ class Trainer(object):
         self.loss_function = loss_function
         # self.grad_scaler = torch.cuda.amp.GradScaler()
 
-
-
         if self.cuda:
             torch.cuda.set_device(self.device)
 
@@ -235,38 +234,8 @@ class Trainer(object):
             if opt.ctc_loss > 0.0:
                 self.ctc_loss_function = self.ctc_loss_function.cuda(device=self.device)
 
-            # Ensure that the distributed copies have the same initial parameters
-            # Manual seed may not work the same for different GPU models.
-            # if self.world_size > 1:
-            #     params = [p for p in self.model.parameters()]
-            #
-            #     with torch.no_grad():
-            #         if not self.is_main():
-            #             # zero everything except for the main model
-            #             for p in params:
-            #                 p.zero_()
-            #         else:
-            #             for p in params:
-            #                 p.add_(0)
-            #
-            # # run all_reduce to ensure that all models have exactly the same parameters
-            # if self.world_size > 1:
-            #     params = [p for p in self.model.parameters()]
-            #     all_reduce_and_rescale_tensors(params, 1)
-
-        if self.cuda:
-            self.model, self.optim.optimizer = amp.initialize(self.model,
-                                                              self.optim.optimizer,
-                                                              opt_level=opt_level,
-                                                              keep_batchnorm_fp32=keep_batchnorm_fp32,
-                                                              loss_scale="dynamic",
-                                                              verbosity=1 if self.opt.verbose else 0)
-
         if opt.load_from:
             checkpoint = torch.load(opt.load_from, map_location=lambda storage, loc: storage)
-            self.model.load_state_dict(checkpoint['model'])
-            if 'scaler' in checkpoint and checkpoint['scaler'] is not None:
-                self.grad_scaler.load_state_dict(checkpoint['scaler'])
 
         if setup_optimizer:
 
@@ -280,13 +249,45 @@ class Trainer(object):
                 if 'optim' in checkpoint and checkpoint['optim'] is not None and not opt.reset_optim:
                     self.optim.load_state_dict(checkpoint['optim'])
 
+        if not self.opt.fp16:
+            opt_level = "O0"
+            keep_batchnorm_fp32 = False
+        elif self.opt.fp16_mixed:
+            opt_level = "O1"
+            keep_batchnorm_fp32 = None
+        else:
+            opt_level = "O2"
+            keep_batchnorm_fp32 = False
+
+        self.opt_level = opt_level
+
+        if self.cuda:
+            self.model, self.optim.optimizer = amp.initialize(self.model,
+                                                              self.optim.optimizer,
+                                                              opt_level=opt_level,
+                                                              keep_batchnorm_fp32=keep_batchnorm_fp32,
+                                                              loss_scale="dynamic",
+                                                              verbosity=1 if self.opt.verbose else 1)
+
+        if opt.load_from:
+            self.model.load_state_dict(checkpoint['model'])
+            if prec_opt is not None and hasattr(prec_opt, "fp16_mixed"):
+                # Only load amp information if the mode is the same
+                # Maybe its better to change between optimization mode?
+                if opt.fp16_mixed == prec_opt.fp16_mixed and opt.fp16 == prec_opt.fp16:
+                    if 'amp' in checkpoint:
+                        try:
+                            amp.load_state_dict(checkpoint['amp'])
+                        except Exception:
+                            # loading the amp state can fail
+                            pass
+
         if self.world_size > 1:
             # find_unused_parameters may be required for dropped layer (parameters that are not connected to
             # any particular graph)
             # find_unused_parameters = True
 
-            self.model = torch.nn.parallel.DistributedDataParallel(self.model, delay_allreduce=True,
-                                                                   gradient_average=False)
+            self.model = DDP(self.model, delay_allreduce=True, gradient_average=False)
 
         print("[INFO] Process %d ready." % self.rank, flush=True)
 
@@ -410,7 +411,7 @@ class Trainer(object):
         opt = self.opt
 
         if self.cuda:
-            batch.cuda(fp16=False)
+            batch.cuda(fp16=self.opt_level == "O2")
 
         self.model.train()
         self.loss_function.train()
@@ -427,66 +428,65 @@ class Trainer(object):
             streaming_state = None
 
         try:
-            with autocast():
-                targets = batch.get('target_output')
-                tgt_mask = None
-                outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
-                                     zero_encoder=opt.zero_encoder,
-                                     mirror=opt.mirror_loss, streaming_state=streaming_state,
-                                     nce=opt.nce)
+            targets = batch.get('target_output')
+            tgt_mask = None
+            outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                 zero_encoder=opt.zero_encoder,
+                                 mirror=opt.mirror_loss, streaming_state=streaming_state,
+                                 nce=opt.nce)
 
-                outputs['tgt_mask'] = tgt_mask
+            outputs['tgt_mask'] = tgt_mask
 
-                loss_dict = self.loss_function(outputs, targets, model=self.model)
-                loss_data = loss_dict['data']
-                loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
-                full_loss = loss
+            loss_dict = self.loss_function(outputs, targets, model=self.model)
+            loss_data = loss_dict['data']
+            loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
+            full_loss = loss
 
-                if opt.ctc_loss > 0.0:
-                    ctc_loss = self.ctc_loss_function(outputs, targets)
-                    ctc_loss_data = ctc_loss.item()
-                    full_loss = full_loss + opt.ctc_loss * ctc_loss
+            if opt.ctc_loss > 0.0:
+                ctc_loss = self.ctc_loss_function(outputs, targets)
+                ctc_loss_data = ctc_loss.item()
+                full_loss = full_loss + opt.ctc_loss * ctc_loss
 
-                if opt.mirror_loss:
-                    rev_loss = loss_dict['rev_loss']
-                    mirror_loss = loss_dict['mirror_loss']
-                    full_loss = full_loss + rev_loss + mirror_loss
+            if opt.mirror_loss:
+                rev_loss = loss_dict['rev_loss']
+                mirror_loss = loss_dict['mirror_loss']
+                full_loss = full_loss + rev_loss + mirror_loss
 
-                # reconstruction loss
-                if opt.reconstruct:
-                    rec_loss = loss_dict['rec_loss']
-                    rec_loss = rec_loss
-                    full_loss = full_loss + rec_loss
+            # reconstruction loss
+            if opt.reconstruct:
+                rec_loss = loss_dict['rec_loss']
+                rec_loss = rec_loss
+                full_loss = full_loss + rec_loss
 
-                optimizer = self.optim.optimizer
+            optimizer = self.optim.optimizer
 
-                if self.opt.memory_profiling:
-                    reporter.report(verbose=True)
+            if self.opt.memory_profiling:
+                reporter.report(verbose=True)
 
-                # for obj in gc.get_objects():
-                #     try:
-                #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-                #             # print(varname(obj))
-                #             # we can rule out parameter cost later
-                #             # if 'parameter' not in type(obj):
-                #             # if len(obj.shape) == 3:
-                #             # if not isinstance(obj, torch.nn.parameter.Parameter):
-                #             #     tensor = obj
-                #             #     numel = tensor.
-                #             print(type(obj), obj.type(), obj.size())
-                #     except:
-                #         pass
+            # for obj in gc.get_objects():
+            #     try:
+            #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+            #             # print(varname(obj))
+            #             # we can rule out parameter cost later
+            #             # if 'parameter' not in type(obj):
+            #             # if len(obj.shape) == 3:
+            #             # if not isinstance(obj, torch.nn.parameter.Parameter):
+            #             #     tensor = obj
+            #             #     numel = tensor.
+            #             print(type(obj), obj.type(), obj.size())
+            #     except:
+            #         pass
 
-                # print("Memory profiling complete.")
-                # print(torch.cuda.memory_summary())
-                # exit()
+            # print("Memory profiling complete.")
+            # print(torch.cuda.memory_summary())
+            # exit()
 
-            self.grad_scaler.scale(full_loss).backward()
-            # if self.cuda:
-            #     with amp.scale_loss(full_loss, optimizer) as scaled_loss:
-            #         scaled_loss.backward()
-            # else:
-            #     loss.div_(batch.tgt_size).backward()
+            # self.grad_scaler.scale(full_loss).backward()
+            if self.cuda:
+                with amp.scale_loss(full_loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.div_(batch.tgt_size).backward()
 
             if self.opt.memory_profiling:
                 print('========= after backward =========')
@@ -540,7 +540,7 @@ class Trainer(object):
             'epoch': epoch,
             'itr': itr_state_dict,
             'optim': optim_state_dict,
-            'scaler': self.grad_scaler.state_dict()
+            'amp': amp.state_dict()
         }
 
         file_name = '%s_ppl_%.6f_e%.2f.pt' % (opt.save_model, valid_ppl, epoch)
@@ -585,16 +585,15 @@ class Trainer(object):
                 samples = next(epoch_iterator)
 
                 if samples:
-                    with autocast():
-                        batch = prepare_sample(samples, device=self.device)
-                        targets = batch.get('target_output')
-                        tgt_mask = targets.ne(onmt.constants.PAD)
-                        outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
-                                             mirror=opt.mirror_loss, streaming_state=streaming_state, nce=opt.nce)
+                    batch = prepare_sample(samples, device=self.device, fp16=self.opt_level == "O2")
+                    targets = batch.get('target_output')
+                    tgt_mask = targets.ne(onmt.constants.PAD)
+                    outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                         mirror=opt.mirror_loss, streaming_state=streaming_state, nce=opt.nce)
 
-                        outputs['tgt_mask'] = tgt_mask
-                        loss_dict = self.loss_function(outputs, targets, model=self.model, eval=True)
-                        loss_data = loss_dict['data']
+                    outputs['tgt_mask'] = tgt_mask
+                    loss_dict = self.loss_function(outputs, targets, model=self.model, eval=True)
+                    loss_data = loss_dict['data']
 
                     total_loss.add_(loss_data)
                     total_words.add_(batch.tgt_size)
@@ -657,7 +656,7 @@ class Trainer(object):
             streaming_state = None
 
         i = data_iterator.iterations_in_epoch if not isinstance(train_data, list) else epoch_iterator.n_yielded
-        i = i * self.world_size
+        # i = i * self.world_size
 
         while not data_iterator.end_of_epoch():
 
@@ -667,7 +666,7 @@ class Trainer(object):
             # TODO: move everything to the multiGPU trainer
             samples = next(epoch_iterator)
 
-            batch = prepare_sample(samples, device=self.device)
+            batch = prepare_sample(samples, device=self.device, fp16=self.opt_level == "O2")
 
             if opt.streaming:
                 if train_data.is_new_stream():
@@ -679,75 +678,84 @@ class Trainer(object):
             oom = False
 
             try:
+
+                # increase i by world size
+                i = i + self.world_size
                 # outputs is a dictionary containing keys/values necessary for loss function
                 # can be flexibly controlled within models for easier extensibility
                 counter = counter + 1
                 reduction_disabled = False if counter >= opt.update_frequency or i == (n_samples - 1) else True
+                # if counter >= opt.update_frequency or i == (n_samples - 1):
+                if self.world_size > 1:
+                    self.model.require_backward_grad_sync = not reduction_disabled
 
-                def maybe_no_sync():
-                    if not reduction_disabled and isinstance(self.model, DDP_model):
-                        return self.model.no_sync()
-                    else:
-                        # when we dont reach the updating step, we do not need to synchronize the gradients
-                        # thus disabling the backward grad sync to improve speed
-                        return contextlib.ExitStack()  # dummy contextmanager
+                # def maybe_no_sync():
+                #     if not reduction_disabled and isinstance(self.model, DDP_model):
+                #         return self.model.no_sync()
+                #     else:
+                #         when we dont reach the updating step, we do not need to synchronize the gradients
+                #         thus disabling the backward grad sync to improve speed
+                # return contextlib.ExitStack()  # dummy contextmanager
 
-                with maybe_no_sync():
-                    with autocast():
-                        targets = batch.get('target_output')
-                        tgt_mask = targets.ne(onmt.constants.PAD)
-                        outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
-                                             zero_encoder=opt.zero_encoder,
-                                             mirror=opt.mirror_loss, streaming_state=streaming_state,
-                                             nce=opt.nce)
+                # with maybe_no_sync():
+                #     with autocast():
+                targets = batch.get('target_output')
+                tgt_mask = targets.ne(onmt.constants.PAD)
+                outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
+                                     zero_encoder=opt.zero_encoder,
+                                     mirror=opt.mirror_loss, streaming_state=streaming_state,
+                                     nce=opt.nce)
 
-                        batch_size = batch.size
-                        outputs['tgt_mask'] = tgt_mask
+                batch_size = batch.size
+                outputs['tgt_mask'] = tgt_mask
 
-                        loss_dict = self.loss_function(outputs, targets, model=self.model)
-                        loss_data = loss_dict['data']
-                        loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
-                        full_loss = loss
+                loss_dict = self.loss_function(outputs, targets, model=self.model)
+                loss_data = loss_dict['data']
+                loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
+                full_loss = loss
 
-                        if opt.ctc_loss > 0.0:
-                            ctc_loss = self.ctc_loss_function(outputs, targets)
-                            ctc_loss_data = ctc_loss.item()
-                            full_loss = full_loss + opt.ctc_loss * ctc_loss
+                if opt.ctc_loss > 0.0:
+                    ctc_loss = self.ctc_loss_function(outputs, targets)
+                    ctc_loss_data = ctc_loss.item()
+                    full_loss = full_loss + opt.ctc_loss * ctc_loss
 
-                        if opt.mirror_loss:
-                            rev_loss = loss_dict['rev_loss']
-                            rev_loss_data = loss_dict['rev_loss_data']
-                            mirror_loss = loss_dict['mirror_loss']
-                            full_loss = full_loss + rev_loss + mirror_loss
-                            mirror_loss_data = loss_dict['mirror_loss'].item()
-                        else:
-                            rev_loss_data = None
-                            mirror_loss_data = 0
+                if opt.mirror_loss:
+                    rev_loss = loss_dict['rev_loss']
+                    rev_loss_data = loss_dict['rev_loss_data']
+                    mirror_loss = loss_dict['mirror_loss']
+                    full_loss = full_loss + rev_loss + mirror_loss
+                    mirror_loss_data = loss_dict['mirror_loss'].item()
+                else:
+                    rev_loss_data = None
+                    mirror_loss_data = 0
 
-                        # reconstruction loss
-                        if opt.reconstruct:
-                            rec_loss = loss_dict['rec_loss']
-                            rec_loss = rec_loss
-                            full_loss = full_loss + rec_loss
-                            rec_loss_data = loss_dict['rec_loss_data']
-                        else:
-                            rec_loss_data = None
+                # reconstruction loss
+                if opt.reconstruct:
+                    rec_loss = loss_dict['rec_loss']
+                    rec_loss = rec_loss
+                    full_loss = full_loss + rec_loss
+                    rec_loss_data = loss_dict['rec_loss_data']
+                else:
+                    rec_loss_data = None
 
-                        if opt.lfv_multilingual:
-                            lid_logits = outputs['lid_logits']
-                            lid_labels = batch.get('target_lang')
-                            lid_loss_function = self.loss_function.get_loss_function('lid_loss')
-                            lid_loss = lid_loss_function(lid_logits, lid_labels)
-                            full_loss = full_loss + lid_loss
+                if opt.lfv_multilingual:
+                    lid_logits = outputs['lid_logits']
+                    lid_labels = batch.get('target_lang')
+                    lid_loss_function = self.loss_function.get_loss_function('lid_loss')
+                    lid_loss = lid_loss_function(lid_logits, lid_labels)
+                    full_loss = full_loss + lid_loss
 
-                        optimizer = self.optim.optimizer
+                optimizer = self.optim.optimizer
 
-                        # When the batch size is large, each gradient step is very easy to explode on fp16
-                        # Normalizing the loss to grad scaler ensures this will not happen
-                        full_loss.div_(grad_div)
+                # When the batch size is large, each gradient step is very easy to explode on fp16
+                # Normalizing the loss to grad scaler ensures this will not happen
+                full_loss.div_(grad_div)
 
-                    # grad scaler has to be done outside of the autocast
-                    self.grad_scaler.scale(full_loss).backward()
+                if self.cuda:
+                    with amp.scale_loss(full_loss, optimizer, delay_unscale=reduction_disabled) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    full_loss.backward()
 
                 del outputs
 
@@ -776,7 +784,7 @@ class Trainer(object):
                 num_accumulated_words.zero_()
                 num_accumulated_sents.zero_()
 
-                print("Warning!!! Loss is Nan")
+                self.print("Warning!!! Loss is Nan")
                 nan_counter.add_(1)
                 # if nan_counter >= 15:
                 #     raise ValueError("Training stopped because of multiple NaN occurence. "
@@ -822,26 +830,25 @@ class Trainer(object):
                 self.all_reduce(nan_counter, op=dist.ReduceOp.SUM, group=self.group)
 
                 grad_denom = 1.0 / grad_div
-
+                #
                 if self.opt.normalize_gradient:
                     grad_denom = num_accumulated_words.item() * grad_denom
 
                 # the gradient is scaled by world size, so in order to match the model without multiGPU
                 # we rescale the model parameters w.r.t the world size
-                grad_denom = grad_denom / self.world_size
+                # grad_denom = grad_denom / self.world_size
 
                 # When we accumulate the gradients, each gradient is already normalized by a constant grad_scaler
-                normalize_gradients(self.model.parameters(), grad_denom)
+                normalize_gradients(amp.master_params(optimizer), grad_denom)
 
                 # Update the parameters.
-                if self.opt.max_grad_norm > 0:
-                    self.grad_scaler.unscale_(self.optim.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt.max_grad_norm)
+                # if self.opt.max_grad_norm > 0:
+                # self.grad_scaler.unscale_(self.optim.optimizer)
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt.max_grad_norm)
 
-                self.optim.step(scaler=self.grad_scaler)
+                self.optim.step()
                 counter = 0
 
-                self.grad_scaler.update()
                 self.optim.zero_grad()
                 self.model.zero_grad()
 
@@ -869,7 +876,7 @@ class Trainer(object):
             # batch_efficiency = total_non_pads / total_tokens
 
             # control the index a little bit to ensure the log is always printed
-            if i == 0 or ((i + 1) % opt.log_interval < self.world_size):
+            if i == self.world_size or (i % opt.log_interval < self.world_size):
 
                 self.all_reduce(report_loss, op=dist.ReduceOp.SUM, group=self.group)
                 self.all_reduce(report_tgt_words, op=dist.ReduceOp.SUM, group=self.group)
@@ -918,9 +925,6 @@ class Trainer(object):
                 report_mirror_loss.zero_()
                 report_ctc_loss.zero_()
                 start = time.time()
-
-            # increase i by world size
-            i = i + self.world_size
 
         return total_loss / total_words
 

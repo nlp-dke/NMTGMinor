@@ -367,6 +367,10 @@ class SpeechTransformerDecoder(TransformerDecoder):
 
         output = self.postprocess_layer(output, factor=tgt_lang)
 
+        nan_mask = torch.logical_or(torch.isnan(output), torch.isinf(output))
+        if nan_mask.any():
+            output.masked_fill_(nan_mask, 0)
+
         output_dict = {'hidden': output, 'coverage': coverage, 'context': context, 'lid_logits': lid_logits}
         output_dict = defaultdict(lambda: None, output_dict)
 

@@ -340,7 +340,7 @@ def main():
                                               augment=opt.augment_speech,
                                               upsampling=opt.upsampling,
                                               cleaning=True, verbose=True,
-                                              num_split=len(opt.gpus))
+                                              num_split=1)
 
                     train_sets.append(train_data)
 

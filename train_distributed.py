@@ -41,7 +41,6 @@ torch.manual_seed(opt.seed)
 
 
 def numpy_to_torch(tensor_list):
-
     out_list = list()
 
     for tensor in tensor_list:
@@ -54,15 +53,17 @@ def numpy_to_torch(tensor_list):
 
 
 def run_process(gpu, train_data, valid_data, dicts, opt, checkpoint):
-
-    from onmt.train_utils.mp_trainer import Trainer
-
-    trainer = Trainer(gpu, train_data, valid_data, dicts, opt)
-    trainer.run(checkpoint=checkpoint)
+    if opt.backend == 'pytorch':
+        from onmt.train_utils.mp_trainer import Trainer
+        trainer = Trainer(gpu, train_data, valid_data, dicts, opt)
+        trainer.run(checkpoint=checkpoint)
+    elif opt.backend == 'apex':
+        from onmt.train_utils.apex_mp_trainer import Trainer
+        trainer = Trainer(gpu, train_data, valid_data, dicts, opt)
+        trainer.run(checkpoint=checkpoint)
 
 
 def main():
-
     if not opt.multi_dataset:
         if opt.data_format in ['bin', 'raw']:
             start = time.time()
@@ -428,8 +429,12 @@ def main():
 
     # spawn N processes for N gpus
     # each process has a different trainer
-    torch.multiprocessing.spawn(run_process, nprocs=len(opt.gpus),
-                                args=(train_data, valid_data, dicts, opt, checkpoint))
+    if opt.backend == "pytorch":
+        torch.multiprocessing.spawn(run_process, nprocs=len(opt.gpus),
+                                    args=(train_data, valid_data, dicts, opt, checkpoint))
+    elif opt.backend == "apex":
+        torch.multiprocessing.spawn(run_process, nprocs=len(opt.gpus),
+                                    args=(train_data, valid_data, dicts, opt, checkpoint))
 
 
 if __name__ == "__main__":
