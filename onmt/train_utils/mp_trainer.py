@@ -767,8 +767,8 @@ class Trainer(object):
                 num_accumulated_words.zero_()
                 num_accumulated_sents.zero_()
 
-                print("Warning!!! Loss is Nan")
-                nan_counter.add_(1)
+                # print("Warning!!! Loss is Nan")
+                # nan_counter.add_(1)
                 # if nan_counter >= 15:
                 #     raise ValueError("Training stopped because of multiple NaN occurence. "
                 #                      "For ASR, using the Relative Transformer is more stable and recommended.")
@@ -792,13 +792,13 @@ class Trainer(object):
                 num_accumulated_words.add_(tgt_size)
                 num_accumulated_sents.add_(batch_size)
 
-            self.all_reduce(nan_counter, op=dist.ReduceOp.SUM, group=self.group)
+            # self.all_reduce(nan_counter, op=dist.ReduceOp.SUM, group=self.group)
             # if we have NaN in one process, then restart all
-            if nan_counter.item() > 0:
-                self.optim.zero_grad()
-                self.model.zero_grad()
-                counter = 0
-                nan_counter.zero_()
+            # if nan_counter.item() > 0:
+            #     self.optim.zero_grad()
+            #     self.model.zero_grad()
+            #     counter = 0
+            #     nan_counter.zero_()
 
             # We only update the parameters after getting gradients from n mini-batches
             update_flag = False
@@ -871,7 +871,8 @@ class Trainer(object):
                 self.all_reduce(report_tgt_words, op=dist.ReduceOp.SUM, group=self.group)
                 self.all_reduce(report_src_words, op=dist.ReduceOp.SUM, group=self.group)
                 # Looks like this op is bugged for some reason?
-                self.all_reduce(report_ctc_loss, op=dist.ReduceOp.SUM, group=self.group)
+                if opt.ctc_loss > 0:
+                    self.all_reduce(report_ctc_loss, op=dist.ReduceOp.SUM, group=self.group)
 
                 if self.is_main():
                     log_string = ("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; " %

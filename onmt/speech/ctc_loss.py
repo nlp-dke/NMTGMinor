@@ -56,22 +56,14 @@ class CTC(torch.nn.Module):
         :return:
         """
 
-        if self.ctc_type == "builtin":
-            log_probs = F.log_softmax(logits.float(), dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
 
-            # Use the deterministic CuDNN implementation of CTC loss to avoid
-            #  [issue#17798](https://github.com/pytorch/pytorch/issues/17798)
-            with torch.backends.cudnn.flags(deterministic=True):
-                loss = self.ctc_loss(log_probs, targets, ilen, olen)
+        # Use the deterministic CuDNN implementation of CTC loss to avoid
+        #  [issue#17798](https://github.com/pytorch/pytorch/issues/17798)
+        with torch.backends.cudnn.flags(deterministic=True):
+            loss = self.ctc_loss(log_probs, targets, ilen, olen)
 
-            return loss
-
-        elif self.ctc_type == "warpctc":
-
-            return self.ctc_loss(logits, targets, ilen, olen)
-
-        else:
-            raise NotImplementedError
+        return loss
 
     def forward(self, model_outputs, targets, **kwargs):
 

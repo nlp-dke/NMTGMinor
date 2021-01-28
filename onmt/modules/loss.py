@@ -80,7 +80,7 @@ class CrossEntropyLossBase(_Loss):
         else:
             vocab_size = self.output_size
 
-        smoothing_value = self.label_smoothing / vocab_size
+        smoothing_value = self.label_smoothing / (vocab_size-2)
 
         gtruth = targets.view(-1)  # B*T
         logits = logits.view(-1, logits.size(-1))  # B*T x V

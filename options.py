@@ -38,7 +38,7 @@ def make_parser(parser):
                         help="""Model filename (the model will be saved as
                         <save_model>_epochN_PPL.pt where PPL is the
                         validation perplexity""")
-    parser.add_argument('-backend', type=str, default='apex',
+    parser.add_argument('-backend', type=str, default='pytorch',
                         help="""Distributed parallel default""")
     parser.add_argument('-load_from', default='', type=str,
                         help="""If training from a checkpoint then this is the
