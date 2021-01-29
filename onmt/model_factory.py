@@ -16,6 +16,7 @@ MAX_LEN = onmt.constants.max_position_length  # This should be the longest sente
 
 
 def build_model(opt, dicts):
+    # adding missing options if the opt was built before. (for loading old models)
     opt = backward_compatible(opt)
 
     onmt.constants.layer_norm = opt.layer_norm
@@ -24,6 +25,11 @@ def build_model(opt, dicts):
     onmt.constants.version = 1.0
     onmt.constants.attention_out = opt.attention_out
     onmt.constants.residual_type = opt.residual_type
+    onmt.constants.fused_ffn = opt.fused_ffn
+    opt.nce = opt.nce_noise > 0
+
+    if 'langs' not in dicts:
+        dicts['langs'] = {'src': 0, 'tgt': 1}
     opt.n_languages = len(dicts['langs'])
 
     if opt.bayes_by_backprop:
@@ -53,28 +59,80 @@ def build_tm_model(opt, dicts):
         assert opt.encoder_type == 'text'
 
     # BUILD GENERATOR
-    if opt.copy_generator:
-        generators = [CopyGenerator(opt.model_size, dicts['tgt'].size(),
-                                    fix_norm=opt.fix_norm_output_embedding)]
-    else:
+    if not opt.multi_dataset:
+        if opt.copy_generator:
+            if opt.nce_noise > 0:
+                print("[INFO] Copy generator overrides NCE.")
+                opt.nce = False
+                opt.nce_noise = 0
+            generators = [CopyGenerator(opt.model_size, dicts['tgt'].size(),
+                                        fix_norm=opt.fix_norm_output_embedding)]
+        elif opt.nce_noise > 0:
+            from onmt.modules.nce.nce_linear import NCELinear
+            from onmt.modules.nce.nce_utils import build_unigram_noise
+            noise_distribution = build_unigram_noise(torch.FloatTensor(list(dicts['tgt'].frequencies.values())))
+
+            generator = NCELinear(opt.model_size, dicts['tgt'].size(), fix_norm=opt.fix_norm_output_embedding,
+                                  noise_distribution=noise_distribution, noise_ratio=opt.nce_noise)
+            generators = [generator]
+        else:
+            generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
+                                                              fix_norm=opt.fix_norm_output_embedding)]
+
+            # if opt.ctc_loss != 0:
+            #     generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size()))
+
+    # BUILD EMBEDDINGS
+    if not opt.multi_embedding:
+        if 'src' in dicts:
+            embedding_src = nn.Embedding(dicts['src'].size(),
+                                         opt.model_size,
+                                         padding_idx=onmt.constants.PAD)
+        else:
+            embedding_src = None
+
+        if opt.join_embedding and embedding_src is not None:
+            embedding_tgt = embedding_src
+            print("* Joining the weights of encoder and decoder word embeddings")
+        else:
+            embedding_tgt = nn.Embedding(dicts['tgt'].size(),
+                                         opt.model_size,
+                                         padding_idx=onmt.constants.PAD)
+
         generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
                                                           fix_norm=opt.fix_norm_output_embedding)]
 
-    # BUILD EMBEDDINGS
-    if 'src' in dicts:
-        embedding_src = nn.Embedding(dicts['src'].size(),
-                                     opt.model_size,
-                                     padding_idx=onmt.constants.PAD)
+        # THIS IS CURRENTLY A BUG - (THIS WEIGHT GROUP DOES NOT DO ANYTHING).
+        # THE CODE IS HERE TO PROPERLY LOAD PREVIOUSLY TRAINED CTC MODEL
+        if opt.ctc_loss != 0:
+            generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size() + 1))
     else:
-        embedding_src = None
+        # for multi embedding
+        assert opt.encoder_type == "audio", "Currently multi-embedding only supports multiASR"
 
-    if opt.join_embedding and embedding_src is not None:
-        embedding_tgt = embedding_src
-        print("* Joining the weights of encoder and decoder word embeddings")
-    else:
-        embedding_tgt = nn.Embedding(dicts['tgt'].size(),
-                                     opt.model_size,
-                                     padding_idx=onmt.constants.PAD)
+        # vocab_sizes = list()
+        # opt.n_languages = len(dicts['langs'])
+        # n_languages = len(dicts['langs'])
+        # idx_to_lang = dict()
+        vocab_sizes = dict()
+        for lang in dicts['langs']:
+            if lang in dicts:
+                vocab_sizes[dicts['langs'][lang]] = dicts[lang].size()
+            else:
+                vocab_sizes[dicts['langs'][lang]] = 0
+
+        from onmt.modules.multilingual_factorized.multi_embeddings import MultiEmbedding, MultiGenerator
+        embedding_tgt = MultiEmbedding(vocab_sizes, opt.model_size,
+                                       padding_idx=onmt.constants.PAD)
+
+        generator = MultiGenerator(opt.model_size, vocab_sizes, fix_norm=opt.fix_norm_output_embedding)
+        generators = [generator]
+
+        # if opt.ctc_loss != 0:
+        #     ctc_generator = MultiGenerator(opt.model_size, vocab_sizes, fix_norm=opt.fix_norm_output_embedding)
+        #     generators.append(ctc_generator)
+        #
+        # #     generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size()))
 
     if opt.use_language_embedding:
         print("* Create language embeddings with %d languages" % len(dicts['langs']))
@@ -82,18 +140,66 @@ def build_tm_model(opt, dicts):
     else:
         language_embeddings = None
 
-    if opt.ctc_loss != 0:
-        generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size() + 1))
-
-    if opt.model in ['speech_transformer']:
+    if opt.model in ['conformer', 'speech_transformer', 'hybrid_transformer']:
         onmt.constants.init_value = opt.param_init
         from onmt.models.speech_recognizer.relative_transformer import \
             SpeechTransformerEncoder, SpeechTransformerDecoder
 
-        encoder = SpeechTransformerEncoder(opt, None, positional_encoder, opt.encoder_type)
-        decoder = SpeechTransformerDecoder(opt, embedding_tgt, positional_encoder,
+        if opt.model == 'conformer':
+            from onmt.models.speech_recognizer.conformer import ConformerEncoder, Conformer
+            from onmt.models.speech_recognizer.lstm import SpeechLSTMDecoder
+            opt.cnn_downsampling = True  # force this bool to have masking at decoder to be corrected
+            encoder = ConformerEncoder(opt, None, None, 'audio')
+
+            decoder = SpeechLSTMDecoder(opt, embedding_tgt, language_embeddings=language_embeddings)
+
+            model = Conformer(encoder, decoder, nn.ModuleList(generators), ctc=opt.ctc_loss > 0.0)
+        elif opt.model == 'hybrid_transformer':
+            from onmt.models.speech_recognizer.lstm import SpeechLSTMDecoder, SpeechLSTMEncoder, SpeechLSTMSeq2Seq
+            encoder = SpeechTransformerEncoder(opt, None, positional_encoder, opt.encoder_type)
+
+            decoder = SpeechLSTMDecoder(opt, embedding_tgt, language_embeddings=language_embeddings)
+
+            model = SpeechLSTMSeq2Seq(encoder, decoder, nn.ModuleList(generators), ctc=opt.ctc_loss > 0.0)
+        else:
+            encoder = SpeechTransformerEncoder(opt, None, positional_encoder, opt.encoder_type)
+
+            decoder = SpeechTransformerDecoder(opt, embedding_tgt, positional_encoder,
                                            language_embeddings=language_embeddings)
-        model = Transformer(encoder, decoder, nn.ModuleList(generators), mirror=opt.mirror_loss)
+            model = RelativeTransformer(encoder, decoder, nn.ModuleList(generators),
+                                        None, None, mirror=opt.mirror_loss, ctc=opt.ctc_loss > 0.0)
+
+        # If we use the multilingual model and weights are partitioned:
+        if opt.multilingual_partitioned_weights:
+
+            # this is basically the language embeddings
+            factor_embeddings = nn.Embedding(len(dicts['langs']), opt.mpw_factor_size)
+
+            encoder.factor_embeddings = factor_embeddings
+            decoder.factor_embeddings = factor_embeddings
+
+    elif opt.model in ["LSTM", 'lstm']:
+        # print("LSTM")
+        onmt.constants.init_value = opt.param_init
+        from onmt.models.speech_recognizer.lstm import SpeechLSTMDecoder, SpeechLSTMEncoder, SpeechLSTMSeq2Seq
+
+        encoder = SpeechLSTMEncoder(opt, None, opt.encoder_type)
+
+        decoder = SpeechLSTMDecoder(opt, embedding_tgt, language_embeddings=language_embeddings)
+
+        model = SpeechLSTMSeq2Seq(encoder, decoder, nn.ModuleList(generators), ctc=opt.ctc_loss > 0.0)
+
+    elif opt.model in ['multilingual_translator', 'translator']:
+        onmt.constants.init_value = opt.param_init
+        from onmt.models.multilingual_translator.relative_transformer import \
+            RelativeTransformerEncoder, RelativeTransformerDecoder
+
+        encoder = RelativeTransformerEncoder(opt, embedding_src, None,
+                                             opt.encoder_type, language_embeddings=language_embeddings)
+        decoder = RelativeTransformerDecoder(opt, embedding_tgt, None, language_embeddings=language_embeddings)
+
+        model = RelativeTransformer(encoder, decoder, nn.ModuleList(generators),
+                                    None, None, mirror=opt.mirror_loss)
 
     elif opt.model in ['transformer', 'stochastic_transformer']:
         onmt.constants.init_value = opt.param_init
@@ -117,6 +223,8 @@ def build_tm_model(opt, dicts):
         model = Transformer(encoder, decoder, nn.ModuleList(generators), mirror=opt.mirror_loss)
 
     elif opt.model == 'relative_transformer':
+        from onmt.models.relative_transformer import \
+            RelativeTransformerEncoder, RelativeTransformerDecoder
 
         if opt.encoder_type == "text":
             encoder = RelativeTransformerEncoder(opt, embedding_src, None,
@@ -229,19 +337,32 @@ def init_model_parameters(model, opt):
     # opt.init something ...
 
     def init_weight(weight):
-        if len(weight.shape) == 2:
-            std_ = math.sqrt(2.0 / (weight.shape[0] + weight.shape[1]))
+        if opt.init == 'normal':
+            if len(weight.shape) == 2:
+                std_ = math.sqrt(2.0 / (weight.shape[0] + weight.shape[1]))
+                nn.init.normal_(weight, 0.0, std_)
+            else:
+                nn.init.normal_(weight, 0.0, init_std)
+        elif opt.init == 'uniform':
+            if len(weight.shape) == 2:
+                nn.init.xavier_uniform_(weight)
+            else:
+                nn.init.uniform_(weight, -init_std, init_std)
+
+    def init_embed(weight, padding_idx=0):
+
+        std_ = opt.model_size ** -0.5
+        if opt.init_embedding == 'normal':
             nn.init.normal_(weight, 0.0, std_)
         else:
-            nn.init.normal_(weight, 0.0, init_std)
+            nn.init.uniform_(weight, -std_, std_)
 
-    def init_embed(weight):
-        # nn.init.uniform_(weight, -0.01, 0.01)
-        nn.init.normal_(weight, 0.0, 0.02)
+        # for some reason normalizing the weights at fp16 doesnt work when setting the padding to 0
+        if not opt.fix_norm_output_embedding:
+            nn.init.constant_(weight[padding_idx], 0)
 
     def init_bias(bias):
-        # nn.init.constant_(bias, 0.0)
-        nn.init.normal_(bias, 0.0, init_std)
+        nn.init.constant_(bias, 0.0)
 
     def weights_init(m):
         classname = m.__class__.__name__
@@ -257,18 +378,19 @@ def init_model_parameters(model, opt):
                 if m.no_need_to_initialize:
                     initialize = False
             if initialize:
-                if opt.init_embedding == 'normal':
-                    if hasattr(m, 'weight'):
-                        init_weight(m.weight)
-                elif opt.init_embedding in ['uniform', 'xavier']:
-                    if hasattr(m, 'weight'):
-                        init_embed(m.weight)
+                if hasattr(m, 'weight') and hasattr(m, 'padding_idx'):
+                    init_embed(m.weight, m.padding_idx)
+            # nn.init.constant_(m.weight[m.padding_idx], 0.0)
+
         elif classname.find('LayerNorm') != -1 or classname.find('FusedLayerNorm') != -1:
             if hasattr(m, 'weight'):
-                nn.init.normal_(m.weight, 1.0, init_std)
+                if opt.init == 'normal':
+                    nn.init.normal_(m.weight, 1.0, init_std)
+                else:
+                    nn.init.uniform_(m.weight, 1.0 - init_std, 1.0 + init_std)
             if hasattr(m, 'bias') and m.bias is not None:
                 init_bias(m.bias)
-
+            pass
         elif classname.find('RelativeTransformerEncoder') != -1:
             if hasattr(m, 'r_emb'):
                 init_weight(m.r_emb)
@@ -292,6 +414,12 @@ def init_model_parameters(model, opt):
                 init_weight(m.r_w_bias)
             if hasattr(m, 'r_r_bias'):
                 init_weight(m.r_r_bias)
+        elif classname.find('EncdecMultiheadAttn') != -1:
+            m.reset_parameters(init=opt.init)
+        elif classname.find('RelativeSelfMultiheadAttn') != -1:
+            m.reset_parameters(init=opt.init)
+        elif classname.find('PositionWiseFeedForward') != -1:
+            m.reset_parameters(init=opt.init)
 
     model.apply(weights_init)
 
@@ -300,6 +428,14 @@ def init_model_parameters(model, opt):
     else:
         model.tgt_embedding.apply(weights_init)
 
+    if opt.multilingual_partitioned_weights:
+        factor_embeddings = model.encoder.factor_embeddings
+
+        # this embedding scheme avoids a large initial perplexity
+        # basically an on-off switch to start with
+        with torch.no_grad():
+            # factor_embeddings.weight.bernoulli_(0.5).mul_(-2).add_(1)
+            factor_embeddings.weight.uniform_(-1, 1)
     return
 
 
@@ -359,7 +495,7 @@ def build_fusion(opt, dicts):
     return model
 
 
-def optimize_model(model):
+def optimize_model(model, fp16=True, distributed=False):
     """
     Used to potentially upgrade the components with more optimized counterparts in the future
     """
@@ -386,4 +522,17 @@ def optimize_model(model):
             for n, ch in m.named_children():
                 replace_layer_norm(ch, n)
 
-    replace_layer_norm(model, "Transformer")
+    def safe_batch_norm(m, name):
+        for attr_str in dir(m):
+            target_attr = getattr(m, attr_str)
+            if type(target_attr) == torch.nn.BatchNorm2d or type(target_attr) == torch.nn.BatchNorm1d:
+
+                if fp16:
+                    target_attr.eps = 1e-5  # tiny value for fp16 according to AllenNLP
+
+                setattr(m, attr_str, target_attr)
+
+    # replace_layer_norm(model, "Transformer")
+
+    # if fp16:
+    #     safe_batch_norm(model, "Transformer")

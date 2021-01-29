@@ -56,6 +56,7 @@ class RelativeTransformerEncoderLayer(nn.Module):
 
         if coin:
 
+            # memory for transformer-xl caching
             if mems is not None and mems.size(0) > 0:
                 mems = self.preprocess_attn(mems)
             else:
@@ -102,6 +103,7 @@ class RelativeTransformerDecoderLayer(nn.Module):
         self.variational = opt.variational_dropout
         self.death_rate = death_rate
         self.fast_self_attention = opt.fast_self_attention
+        # self.lfv_multilingual = opt.lfv_multilingual
 
         self.preprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence='n')
         self.postprocess_attn = PrePostProcessing(opt.model_size, opt.dropout, sequence='da',
@@ -135,6 +137,13 @@ class RelativeTransformerDecoderLayer(nn.Module):
         else:
             self.feedforward = PositionWiseFeedForward(opt.model_size, opt.inner_size, opt.dropout,
                                                        variational=self.variational)
+
+        # if opt.lfv_multilingual:
+        #     self.lid_net = lid_net
+        #     self.lfv_mapper = nn.Linear(opt.bottleneck_size, opt.model_size)
+        # else:
+        #     self.lid_net = None
+        #     self.lfv_mapper = None
 
     # def forward(self, input, context, pos_emb, r_w_bias, r_r_bias, mask_tgt, mask_src):
     def forward(self, input, context, pos_emb, mask_tgt, mask_src,

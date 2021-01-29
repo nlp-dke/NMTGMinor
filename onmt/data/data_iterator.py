@@ -9,9 +9,11 @@ import os
 import queue
 import time
 from threading import Thread
+import random
 
 import numpy as np
 import torch
+from onmt.data.dataset import rewrap
 
 from onmt.data import data_utils
 
@@ -30,9 +32,10 @@ class CountingIterator(object):
         n (int): number of elements consumed from this iterator
     """
 
-    def __init__(self, iterable, start=None, total=None):
+    def __init__(self, iterable, start=None, total=None, empty=False):
         self.iterable = iterable
         self.itr = iter(self)
+        self.empty = empty
 
         if start is None:
             self.n = getattr(iterable, 'n', 0)
@@ -48,6 +51,8 @@ class CountingIterator(object):
         return self.total
 
     def __iter__(self):
+        if self.empty:
+            return
         for x in self.iterable:
             if self.n >= self.total:
                 return
@@ -55,6 +60,8 @@ class CountingIterator(object):
             yield x
 
     def __next__(self):
+        if self.empty:
+            return None
         return next(self.itr)
 
     def has_next(self):
@@ -121,7 +128,8 @@ dataset (~torch.utils.data.Dataset)
 
 class DataIterator(EpochBatchIterating):
 
-    def __init__(self, dataset, collate_fn, batch_sampler, seed=1, num_workers=0, epoch=1, buffer_size=0, timeout=0):
+    def __init__(self, dataset, collate_fn, batch_sampler, seed=1, num_workers=0,
+                 epoch=1, buffer_size=0, timeout=0, num_shards=1, shard_id=0, fill_value=True):
         """
         :param dataset:
         :param collate_fn:
@@ -131,6 +139,8 @@ class DataIterator(EpochBatchIterating):
         :param epoch:
         :param buffer_size:
         :param timeout:
+        :param shard_id: equivalent with rank
+        :param num_shards: equivalent with world size
         """
         assert isinstance(dataset, torch.utils.data.Dataset)
 
@@ -143,10 +153,14 @@ class DataIterator(EpochBatchIterating):
         self.buffer_size = buffer_size
         self.timeout = timeout
 
+        self.shard_id = shard_id
+        self.num_shards = num_shards
+
         self.shuffle = True
         self._cur_epoch_itr = None
         self._next_epoch_itr = None
         self._support_prefetch = False
+        self.fill_value = fill_value
 
     def __len__(self):
         # number of minibatches, or ???
@@ -240,7 +254,21 @@ class DataIterator(EpochBatchIterating):
         else:
             batches = self.frozen_batches
 
-        batches = list(ShardedIterator(batches, 1, 0, fill_value=None))
+        num_shards = self.num_shards
+
+        fill_batch = random.choice(batches) if self.fill_value else None
+        batches = list(ShardedIterator(batches, num_shards, self.shard_id, fill_value=fill_batch))
+
+        # catch the exception when the data is so small that one iterator is completely empty
+        if batches[0] is None:
+            empty = True
+            print("This iterator is empty")
+        else:
+            empty = False
+
+        # remove the last element if None
+        if batches[-1] is None:
+            batches.pop()
 
         if offset > 0 and offset >= len(batches):
             return None
@@ -263,7 +291,7 @@ class DataIterator(EpochBatchIterating):
             itr = BufferedIterator(self.buffer_size, itr)
 
         # Wrap with CoutingIterator
-        itr = CountingIterator(itr, start=offset)
+        itr = CountingIterator(itr, start=offset, empty=empty)
         return itr
 
 
@@ -281,8 +309,8 @@ class ShardedIterator(CountingIterator):
 
     def __init__(self, iterable, num_shards, shard_id, fill_value=None):
 
-        assert num_shards == 1
-        assert shard_id == 0
+        # assert num_shards == 1
+        # assert shard_id == 0
 
         if shard_id < 0 or shard_id >= num_shards:
             raise ValueError('shard_id must be between 0 and num_shards')
@@ -291,6 +319,7 @@ class ShardedIterator(CountingIterator):
         # first islice takes a list of minibatch-ids from shard_id to max, every num_shards
         # next, zip_longest takes the zip between (0, 1, ... n) and the minibatches (longest, fill the latter with [])
         # next, map will apply the function taking the minibatches to return the iterator
+
         itr = map(
             operator.itemgetter(1),
             itertools.zip_longest(
@@ -299,6 +328,7 @@ class ShardedIterator(CountingIterator):
                 fillvalue=fill_value,
             ),
         )
+
         super().__init__(
             itr,
             start=int(math.ceil(getattr(iterable, 'n', 0) / float(num_shards))),

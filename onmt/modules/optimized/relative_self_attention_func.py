@@ -1,6 +1,18 @@
 import torch
 import torch.nn.functional as F
 
+try:
+    import apex.amp as amp
+    from apex.amp import half_function
+except (ModuleNotFoundError, ImportError) as e:
+    amp = None
+    from .compat import half_function
+
+try:
+    from torch.cuda.amp import custom_fwd, custom_bwd
+except (ModuleNotFoundError, ImportError) as e:
+    from .compat import custom_fwd, custom_bwd
+
 
 class RelativeShiftFunction(torch.autograd.Function):
 
@@ -24,7 +36,7 @@ class RelativeShift(object):
     @staticmethod
     def forward(x, batch_first, emb_last):
         assert len(x.shape) == 3, "Input must have 3 dimensions B x len_q x len_r or len_q x len_r x demb!"
-        assert (batch_first or emb_last) and not(batch_first and emb_last), \
+        assert (batch_first or emb_last) and not (batch_first and emb_last), \
             "Batch first and Embedding last must be mutually exclusive"
 
         if batch_first:
@@ -74,6 +86,7 @@ class RelativeShift(object):
 
 class RelativeSelfAttnFunc(torch.autograd.Function):
     @staticmethod
+    @custom_fwd(cast_inputs=torch.float16)
     def forward(ctx, inputs, pos, use_time_mask, is_training, heads,
                 input_weights, output_weights, pos_weights,
                 input_biases, output_biases, pos_biases,
@@ -164,7 +177,6 @@ class RelativeSelfAttnFunc(torch.autograd.Function):
                 incremental_cache['v'] = values
             keys = keys.view(-1, bsz * heads, head_dim)
             values = values.view(-1, bsz * heads, head_dim)
-
         # Relative Attention from here:
         # r_w_bias size: head * head_dim
         rw_head_q = queries.view(len_q, bsz, heads, head_dim) + r_w_bias  #
@@ -225,6 +237,9 @@ class RelativeSelfAttnFunc(torch.autograd.Function):
         dtype_ = torch.float64 if double_precision else torch.float32
         softmax_results = F.softmax(attn_score, dim=-1, dtype=dtype_).type_as(attn_score)
 
+        nan_mask = torch.isnan(softmax_results)
+        if nan_mask.any():
+            softmax_results.masked_fill_(nan_mask, 0)
         # Dropout - is not executed for inference
         if is_training:
             dropout_results, dropout_mask = torch._fused_dropout(softmax_results, p=(1. - dropout_prob_t[0]))
@@ -290,7 +305,7 @@ class RelativeSelfAttnFunc(torch.autograd.Function):
                               input_weights, pos_weights,
                               output_weights,
                               r_w_bias, r_r_bias,
-                              dropout_mask,
+                              dropout_mask, nan_mask,
                               dropout_prob_t)
 
         ctx.add_position = add_position
@@ -301,6 +316,7 @@ class RelativeSelfAttnFunc(torch.autograd.Function):
         # return outputs.detach()
 
     @staticmethod
+    @custom_bwd
     def backward(ctx, output_grads, softmax_grads):
         # def backward(ctx, output_grads):
         """
@@ -320,7 +336,7 @@ class RelativeSelfAttnFunc(torch.autograd.Function):
         input_weights, pos_weights, \
         output_weights, \
         r_w_bias, r_r_bias, \
-        dropout_mask, \
+        dropout_mask, nan_mask, \
         dropout_prob_t = ctx.saved_tensors
 
         head_dim = inputs.size(2) // heads_t[0]
@@ -381,8 +397,12 @@ class RelativeSelfAttnFunc(torch.autograd.Function):
         else:
             dropout_grads = matmul2_dgrad1
 
+        if nan_mask.any():
+            dropout_grads.masked_fill_(nan_mask, 0)
+
         # Softmax Grad (not a publically documented op)
         softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, softmax_results)
+
         attn_score_grads = softmax_grads
         # the grads are evenly distributed to AC and BD
         matmul_ac_grads = attn_score_grads
@@ -478,4 +498,19 @@ class RelativeSelfAttnFunc(torch.autograd.Function):
                None, None, None, None, None, None
 
 
-relative_self_attn_func = RelativeSelfAttnFunc.apply
+@half_function
+def relative_self_attn_func(input, pos, use_mask, is_training, num_heads,
+                            in_proj_weight, out_proj_weight, pos_proj_weight,
+                            in_proj_bias, out_proj_bias, pos_proj_bias,
+                            r_w_bias, r_r_bias,
+                            mask, dropout,
+                            incremental, incremental_cache, something, another):
+
+    output, coverage = RelativeSelfAttnFunc.apply(input, pos, use_mask, is_training, num_heads,
+                                                  in_proj_weight, out_proj_weight, pos_proj_weight,
+                                                  in_proj_bias, out_proj_bias, pos_proj_bias,
+                                                  r_w_bias, r_r_bias,
+                                                  mask, dropout,
+                                                  incremental, incremental_cache, something, another)
+
+    return output, coverage

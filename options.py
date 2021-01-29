@@ -7,19 +7,17 @@ def make_parser(parser):
                         help='Path to the *-train.pt file from preprocess.py')
     parser.add_argument('-data_format', required=False, default='raw',
                         help='Default data format: raw')
-    parser.add_argument('-additional_data', required=False, default='none',
-                        help='Path to the *-train.pt file from preprocess.py for addtional data; sepeated by semi-colon')
-    parser.add_argument('-additional_data_format', required=False, default='bin',
-                        help='Default data format: raw')
-    parser.add_argument('-data_ratio', required=False, default='1',
-                        help='ratio how to use the data and additiona data  e.g. 1;2;2; default 1;1;1;1;...')
+
+    parser.add_argument('-multi_dataset', action='store_true',
+                        help='Reading multiple datasets (sharing the same dictionary)')
+
     parser.add_argument('-patch_vocab_multiplier', type=int, default=1,
                         help='Pad vocab so that the size divides by this multiplier')
     parser.add_argument('-src_align_right', action="store_true",
                         help="""Aligning the source sentences to the right (default=left for Transformer)""")
     parser.add_argument('-buffer_size', type=int, default=16,
                         help='The iterator fills the data buffer with this size')
-    parser.add_argument('-num_workers', type=int, default=4,
+    parser.add_argument('-num_workers', type=int, default=0,
                         help='Number of extra workers for data fetching. 0=uses the main process. ')
     parser.add_argument('-pin_memory', action="store_true",
                         help='The data loader pins memory into the GPU to reduce the bottleneck between GPU-CPU')
@@ -40,6 +38,8 @@ def make_parser(parser):
                         help="""Model filename (the model will be saved as
                         <save_model>_epochN_PPL.pt where PPL is the
                         validation perplexity""")
+    parser.add_argument('-backend', type=str, default='pytorch',
+                        help="""Distributed parallel default""")
     parser.add_argument('-load_from', default='', type=str,
                         help="""If training from a checkpoint then this is the
                         path to the pretrained model.""")
@@ -68,6 +68,9 @@ def make_parser(parser):
 
     parser.add_argument('-asynchronous', action='store_true',
                         help="""Different attention values for past and future""")
+    parser.add_argument('-nce_noise', type=int, default=0,
+                        help="""Use noise contrastive estimation for the output layer. 
+                        Default=0 (full softmax), increase to 100 to use 100 noise samples.""")
     parser.add_argument('-unidirectional', action='store_true',
                         help="""Unidirectional encoder""")
     parser.add_argument('-reconstruct', action='store_true',
@@ -121,6 +124,8 @@ def make_parser(parser):
                         help="Type of encoder to use. Options are [text|img].")
     parser.add_argument('-input_size', type=int, default=2048,
                         help='Size of input features')
+    parser.add_argument('-init', default='normal',
+                        help="How to init the weight. normal or uniform/xavier.")
     parser.add_argument('-init_embedding', default='normal',
                         help="How to init the embedding matrices. Xavier or Normal.")
     parser.add_argument('-batch_size_words', type=int, default=2048,
@@ -142,8 +147,6 @@ def make_parser(parser):
                         help='Extra context size in transformer Xl')
     parser.add_argument('-epochs', type=int, default=13,
                         help='Number of training epochs')
-    parser.add_argument('-start_epoch', type=int, default=1,
-                        help='The epoch from which to start')
     parser.add_argument('-param_init', type=float, default=0.1,
                         help="""Parameters are initialized over uniform distribution
                         with support (-param_init, param_init)""")
@@ -167,15 +170,12 @@ def make_parser(parser):
     parser.add_argument('-scheduled_sampling_rate', type=float, default=0.0,
                         help='Scheduled sampling rate.')
 
-
     parser.add_argument('-curriculum', type=int, default=-1,
                         help="""For this many epochs, order the minibatches based
                         on source sequence length. Sometimes setting this to 1 will
                         increase convergence speed.""")
     parser.add_argument('-normalize_gradient', action="store_true",
                         help="""Normalize the gradients by number of tokens before updates""")
-    parser.add_argument('-virtual_gpu', type=int, default=1,
-                        help='Number of virtual gpus. The trainer will try to mimic asynchronous multi-gpu training')
     # learning rate
     parser.add_argument('-learning_rate', type=float, default=1.0,
                         help="""Starting learning rate. If adagrad/adadelta/adam is
@@ -194,6 +194,8 @@ def make_parser(parser):
                         help="""Number of steps to increase the lr in noam""")
     parser.add_argument('-max_steps', type=int, default=100000,
                         help="""Number of steps to train the model""")
+    parser.add_argument('-starting_step', type=int, default=-1,
+                        help="""Override the steps in the optim to this step""")
     parser.add_argument('-noam_step_interval', type=int, default=1,
                         help="""How many steps before updating the parameters""")
     parser.add_argument('-max_step', type=int, default=40000,
@@ -217,7 +219,10 @@ def make_parser(parser):
                         help='Set the model into the experimental mode (trying unverified features)')
     parser.add_argument('-join_embedding', action='store_true',
                         help='Jointly train the embedding of encoder and decoder in one weight')
-
+    parser.add_argument('-add_position_encoding', action='store_true',
+                        help='Adding pos encodings to embedding (like Transformer)')
+    parser.add_argument('-batch_ensemble', type=int, default=0,
+                        help='To use batch ensemble algorithm')
 
     # GPU
     parser.add_argument('-gpus', default=[], nargs='+', type=int,
@@ -226,8 +231,6 @@ def make_parser(parser):
                         help='Use half precision training')
     parser.add_argument('-fp16_mixed', action='store_true',
                         help='Use mixed half precision training. fp16 must be enabled.')
-    parser.add_argument('-fp16_loss_scale', type=float, default=8,
-                        help="""Loss scale for fp16 loss (to avoid overflowing in fp16).""")
     parser.add_argument('-seed', default=-1, type=int,
                         help="Seed for deterministic runs.")
 
@@ -250,8 +253,10 @@ def make_parser(parser):
                         help="""Fast self attention between encoder decoder""")
     parser.add_argument('-fast_feed_forward', action="store_true",
                         help="""Fast cross attention between encoder decoder""")
-    parser.add_argument('-overclocking', action="store_true",
-                        help="""Fast cross attention between encoder decoder""")
+    parser.add_argument('-macaron', action='store_true',
+                        help='Macaron style network with 2 FFN per block.')
+    parser.add_argument('-fused_ffn', action="store_true",
+                        help="""Fast feedforward""")
 
     # for FUSION
     parser.add_argument('-lm_checkpoint', default='', type=str,
@@ -280,10 +285,51 @@ def make_parser(parser):
                         help='Zero-out encoders during training')
     parser.add_argument('-ctc_loss', type=float, default=0.0,
                         help='CTC Loss as additional loss function with this weight')
+    parser.add_argument('-override_ctc_loss', type=float, default=-1,
+                        help='CTC Loss as additional loss function with this weight')
     parser.add_argument('-lfv_multilingual', action='store_true',
                         help='Use multilingual language identifier to get LFV for each language')
     parser.add_argument('-bottleneck_size', type=int, default=64,
                         help="Bottleneck size for the LFV vector).")
+    parser.add_argument('-conv_kernel', type=int, default=31,
+                        help="Kernels for convolution in conformer).")
+    parser.add_argument('-no_batch_norm', action='store_true',
+                        help="Remove Batch Norm to avoid NaN errors that can happen with spec augmentation.).")
+    parser.add_argument('-depthwise_conv', action='store_true',
+                        help='Use depthwise convolution in the encoder block')
+    parser.add_argument('-no_ffn', action='store_true',
+                        help='No feedforward network in the speech encoder')
+
+    parser.add_argument('-multilingual_factorized_weights', action='store_true',
+                        help='Factorize the weights in the model for multilingual')
+    parser.add_argument('-mfw_rank', type=int, default=1,
+                        help="Rank of the mfw vectors.")
+    parser.add_argument('-mfw_multiplicative', action='store_true',
+                        help='Use another multiplicative weights W = W^ * M + A')
+    parser.add_argument('-mfw_activation', type=str, default="none",
+                        help="Using activation function for the MFW so  W = f(W^ * M + A'). "
+                             "Currently accepting gelu/silu")
+    parser.add_argument('-mfw_normalize', action='store_true',
+                        help='normalize W = W^ * M + A in the weight normalization style')
+
+    parser.add_argument('-multilingual_partitioned_weights', action='store_true',
+                        help='Partition the weights in the multilingual models')
+    parser.add_argument('-mpw_factor_size', type=int, default=8,
+                        help="Size of the language factor vector")
+    parser.add_argument('-multilingual_layer_norm', action='store_true',
+                        help='New norm for each language')
+    parser.add_argument('-multilingual_linear_projection', action='store_true',
+                        help='New linear projection for each language')
+    parser.add_argument('-sub_encoder', type=int, default=4,
+                        help='New linear projection for each language')
+    parser.add_argument('-weight_drop', type=float, default=0.0,
+                        help='dropout rate for the main weights of the MFW model')
+    parser.add_argument('-multilingual_adapter', action='store_true',
+                        help='New norm for each language')
+    parser.add_argument('-adapter_bottleneck_size', type=int, default=1024,
+                        help='New norm for each language')
+    parser.add_argument('-multi_embedding', action='store_true',
+                        help='New embedding / output layer for each layer')
 
     # for Reformer
     # parser.add_argument('-lsh_src_attention', action='store_true',
@@ -302,6 +348,13 @@ def make_parser(parser):
                         help='Using reversible models for encoder')
     parser.add_argument('-tgt_reversible', action='store_true',
                         help='Using reversible models for decoder')
+
+    parser.add_argument('-debugging', action='store_true',
+                        help='Using reversible models for decoder')
+    parser.add_argument('-master_addr', default='localhost', type=str,
+                        help="""""")
+    parser.add_argument('-master_port', default='8888', type=str,
+                        help="""""")
     return parser
 
 
@@ -324,7 +377,7 @@ def backward_compatible(opt):
         opt.input_size = 40
 
     if not hasattr(opt, 'init_embedding'):
-        opt.init_embedding = 'xavier'
+        opt.init_embedding = 'normal'
 
     if not hasattr(opt, 'ctc_loss'):
         opt.ctc_loss = 0
@@ -419,10 +472,82 @@ def backward_compatible(opt):
     if not hasattr(opt, 'fast_feed_forward'):
         opt.fast_feed_forward = False
 
+    if not hasattr(opt, 'fused_ffn'):
+        opt.fused_ffn = False
+
     if not hasattr(opt, 'concat'):
         opt.concat = 4
 
     if not hasattr(opt, 'input_feature_size'):
         opt.input_feature_size = 40
+
+    if not hasattr(opt, 'bayes_by_backprop'):
+        opt.bayes_by_backprop = False
+
+    if not hasattr(opt, 'add_position_encoding'):
+        opt.add_position_encoding = False
+
+    if not hasattr(opt, 'batch_ensemble'):
+        opt.batch_ensemble = 0
+
+    if not hasattr(opt, 'multilingual_factorized_weights'):
+        opt.multilingual_factorized_weights = False
+
+    if not hasattr(opt, 'mfw_rank'):
+        opt.mfw_rank = 1
+
+    if not hasattr(opt, 'lfv_multilingual'):
+        opt.lfv_multilingual = False
+
+    if not hasattr(opt, 'nce_noise'):
+        opt.nce_noise = 0
+
+    if not hasattr(opt, 'mfw_multiplicative'):
+        opt.mfw_multiplicative = False
+
+    if not hasattr(opt, 'macaron'):
+        opt.macaron = False
+
+    if not hasattr(opt, 'depthwise_conv'):
+        opt.depthwise_conv = False
+
+    if not hasattr(opt, 'fused_ffn'):
+        opt.fused_ffn = False
+
+    if not hasattr(opt, 'no_batch_norm'):
+        opt.no_batch_norm = False
+
+    if not hasattr(opt, 'no_ffn'):
+        opt.no_ffn = False
+
+    if not hasattr(opt, 'multilingual_partitioned_weights'):
+        opt.multilingual_partitioned_weights = False
+
+    if not hasattr(opt, 'mpw_factor_size'):
+        opt.mpw_factor_size = 1
+
+    if not hasattr(opt, 'multilingual_layer_norm'):
+        opt.multilingual_layer_norm = False
+
+    if not hasattr(opt, 'multilingual_linear_projection'):
+        opt.multilingual_linear_projection = False
+
+    if not hasattr(opt, 'weight_drop'):
+        opt.weight_drop = 0.0
+
+    if not hasattr(opt, 'multilingual_adapter'):
+        opt.multilingual_adapter = False
+
+    if not hasattr(opt, 'adapter_bottleneck_size'):
+        opt.adapter_bottleneck_size = 0.0
+
+    if not hasattr(opt, 'mfw_activation'):
+        opt.mfw_activation = "none"
+
+    if not hasattr(opt, 'mfw_normalize'):
+        opt.mfw_normalize = False
+
+    if not hasattr(opt, 'multi_embedding'):
+        opt.multi_embedding = False
 
     return opt

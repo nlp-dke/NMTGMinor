@@ -94,7 +94,9 @@ def collect_fn(src_data, tgt_data,
                src_lang_data, tgt_lang_data,
                src_align_right, tgt_align_right,
                src_type='text',
-               augmenter=None, upsampling=False):
+               augmenter=None, upsampling=False,
+               bilingual=False, vocab_mask=None):
+
     tensors = dict()
     if src_data is not None:
         tensors['source'], tensors['source_pos'], src_lengths = merge_data(src_data, align_right=src_align_right,
@@ -129,6 +131,8 @@ def collect_fn(src_data, tgt_data,
     if tgt_lang_data is not None:
         tensors['target_lang'] = torch.cat(tgt_lang_data).long()
 
+    tensors['vocab_mask'] = vocab_mask
+
     return LightBatch(tensors)
 
 
@@ -152,6 +156,7 @@ class Batch(object):
         self.src_lengths = tensors['src_lengths']
         self.tgt_lengths = tensors['tgt_lengths']
         self.has_target = True if self.tensors['target'] is not None else False
+        self.vocab_mask = tensors['vocab_mask']
 
     def get(self, name):
         if name in self.tensors:
@@ -159,9 +164,10 @@ class Batch(object):
         else:
             return None
 
-    def cuda(self, fp16=False):
+    def cuda(self, fp16=False, device=None):
         """
-        Send the minibatch data into GPU. Old-fashioned without the 'device' control
+        Send the minibatch data into GPU.
+        :param device: default = None (default CUDA device)
         :param fp16:
         :return: None
         """
@@ -170,12 +176,12 @@ class Batch(object):
                 for k in tensor:
                     if isinstance(k, torch.Tensor):
                         v = tensor[k]
-                        tensor[k] = v.cuda()
+                        tensor[k] = v.cuda(device=device)
             elif tensor is not None:
                 if isinstance(tensor, torch.Tensor):
                     if tensor.type() == "torch.FloatTensor" and fp16:
                         self.tensors[key] = tensor.half()
-                    self.tensors[key] = self.tensors[key].cuda()
+                    self.tensors[key] = self.tensors[key].cuda(device=device)
             else:
                 continue
 
@@ -227,6 +233,7 @@ class Dataset(torch.utils.data.Dataset):
                  augment=False,
                  src_align_right=False, tgt_align_right=False,
                  verbose=False, cleaning=False, debug=False,
+                 num_split=1,
                  **kwargs):
         """
         :param src_data: List of tensors for the source side (1D for text, 2 or 3Ds for other modalities)
@@ -264,6 +271,8 @@ class Dataset(torch.utils.data.Dataset):
         self.max_tgt_len = kwargs.get('max_tgt_len', 256)
         self.cleaning = cleaning
         self.debug = debug
+        self.num_split = num_split
+        self.vocab_mask = None
 
         if self.max_src_len is None:
             if self._type == 'text':
@@ -283,7 +292,7 @@ class Dataset(torch.utils.data.Dataset):
         # Processing data sizes
         if self.src is not None:
             if src_sizes is not None:
-                self.src_sizes = src_sizes
+                self.src_sizes = np.asarray(src_sizes)
             else:
                 self.src_sizes = np.asarray([data.size(0) for data in self.src])
         else:
@@ -291,7 +300,7 @@ class Dataset(torch.utils.data.Dataset):
 
         if self.tgt is not None:
             if tgt_sizes is not None:
-                self.tgt_sizes = tgt_sizes
+                self.tgt_sizes = np.asarray(tgt_sizes)
             else:
                 self.tgt_sizes = np.asarray([data.size(0) for data in self.tgt])
         else:
@@ -355,6 +364,7 @@ class Dataset(torch.utils.data.Dataset):
                                       self.max_src_len, self.max_tgt_len, self.cleaning)
 
         # the second to last mini-batch is likely the largest
+        # (the last one can be the remnant after grouping samples which has less than max size)
         self.largest_batch_id = len(self.batches) - 2
 
         self.num_batches = len(self.batches)
@@ -379,6 +389,9 @@ class Dataset(torch.utils.data.Dataset):
 
         pass
 
+    def set_mask(self, vocab_mask):
+        self.vocab_mask = vocab_mask
+
     def get_largest_batch(self):
 
         return self.get_batch(self.largest_batch_id)
@@ -400,6 +413,8 @@ class Dataset(torch.utils.data.Dataset):
                 src_lang = self.src_langs[index]
             if self.tgt_langs is not None:
                 tgt_lang = self.tgt_langs[index]
+
+        # move augmenter here?
 
         sample = {
             'src': self.src[index] if self.src is not None else None,
@@ -448,38 +463,54 @@ class Dataset(torch.utils.data.Dataset):
                                   src_lang_data=src_lang_data, tgt_lang_data=tgt_lang_data,
                                   src_align_right=self.src_align_right, tgt_align_right=self.tgt_align_right,
                                   src_type=self._type,
-                                  augmenter=self.augmenter, upsampling=self.upsampling)
+                                  augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask)
                        )
         return batch
 
-    def collater(self, samples):
+    def collater(self, collected_samples):
         """
         Merge a list of samples into a Batch
-        :param samples: list of dicts (the output of the __getitem__)
+        :param collected_samples: list of dicts (the output of the __getitem__)
         :return: batch
         """
 
-        src_data, tgt_data = None, None
-        src_lang_data, tgt_lang_data = None, None
+        split_size = math.ceil(len(collected_samples) / self.num_split)
+        sample_list = [collected_samples[i:i+split_size]
+                       for i in range(0, len(collected_samples), split_size)]
 
-        if self.src:
-            src_data = [sample['src'] for sample in samples]
+        batches = list()
 
-        if self.tgt:
-            tgt_data = [sample['tgt'] for sample in samples]
+        for samples in sample_list:
 
-        if self.src_langs is not None:
-            src_lang_data = [sample['src_lang'] for sample in samples]  # should be a tensor [0]
-        if self.tgt_langs is not None:
-            tgt_lang_data = [sample['tgt_lang'] for sample in samples]  # should be a tensor [1]
+            src_data, tgt_data = None, None
+            src_lang_data, tgt_lang_data = None, None
 
-        batch = collect_fn(src_data, tgt_data=tgt_data,
-                           src_lang_data=src_lang_data, tgt_lang_data=tgt_lang_data,
-                           src_align_right=self.src_align_right, tgt_align_right=self.tgt_align_right,
-                           src_type=self._type,
-                           augmenter=self.augmenter, upsampling=self.upsampling)
+            if self.src:
+                src_data = [sample['src'] for sample in samples]
 
-        return batch
+            if self.tgt:
+                tgt_data = [sample['tgt'] for sample in samples]
+
+            if self.bilingual:
+                if self.src_langs is not None:
+                    src_lang_data = [self.src_langs[0]]  # should be a tensor [0]
+                if self.tgt_langs is not None:
+                    tgt_lang_data = [self.tgt_langs[0]]  # should be a tensor [1]
+            else:
+                if self.src_langs is not None:
+                    src_lang_data = [sample['src_lang'] for sample in samples]  # should be a tensor [0]
+                if self.tgt_langs is not None:
+                    tgt_lang_data = [sample['tgt_lang'] for sample in samples]  # should be a tensor [1]
+
+            batch = collect_fn(src_data, tgt_data=tgt_data,
+                               src_lang_data=src_lang_data, tgt_lang_data=tgt_lang_data,
+                               src_align_right=self.src_align_right, tgt_align_right=self.tgt_align_right,
+                               src_type=self._type,
+                               augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask)
+
+            batches.append(batch)
+
+        return batches
 
     def __len__(self):
         return self.full_size

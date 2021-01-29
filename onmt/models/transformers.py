@@ -99,12 +99,16 @@ class TransformerEncoder(nn.Module):
                 self.audio_trans = nn.Linear(feature_size, self.model_size)
                 torch.nn.init.xavier_uniform_(self.audio_trans.weight)
             else:
-                channels = self.channels
-                cnn = [nn.Conv2d(channels, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True), nn.BatchNorm2d(32),
-                       nn.Conv2d(32, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True), nn.BatchNorm2d(32)]
+                channels = self.channels  # should be 1
+
+                if not opt.no_batch_norm:
+                    cnn = [nn.Conv2d(channels, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True), nn.BatchNorm2d(32),
+                           nn.Conv2d(32, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True), nn.BatchNorm2d(32)]
+                else:
+                    cnn = [nn.Conv2d(channels, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True),
+                           nn.Conv2d(32, 32, kernel_size=(3, 3), stride=2), nn.ReLU(True)]
 
                 feat_size = (((feature_size // channels) - 3) // 4) * 32
-                # cnn.append()
                 self.audio_trans = nn.Sequential(*cnn)
                 self.linear_trans = nn.Linear(feat_size, self.model_size)
                 # assert self.model_size == feat_size, \
@@ -112,12 +116,6 @@ class TransformerEncoder(nn.Module):
         else:
             self.word_lut = embedding
 
-        # if opt.time == 'positional_encoding':
-        #     self.time_transformer = positional_encoder
-        # elif opt.time == 'gru':
-        #     self.time_transformer = nn.GRU(self.model_size, self.model_size, 1, batch_first=True)
-        # elif opt.time == 'lstm':
-        #     self.time_transformer = nn.LSTM(self.model_size, self.model_size, 1, batch_first=True)
         self.time_transformer = positional_encoder
         self.language_embedding = language_embeddings
 
@@ -146,9 +144,6 @@ class TransformerEncoder(nn.Module):
 
             if not self.lsh_src_attention:
                 if not self.reversible:
-                    # block = EncoderLayer(self.n_heads, self.model_size,
-                    #                      self.dropout, self.inner_size, self.attn_dropout,
-                    #                      variational=self.varitional_dropout, death_rate=death_r)
                     block = EncoderLayer(self.opt, death_rate=death_r)
                 else:
                     block = ReversibleTransformerEncoderLayer(self.opt, death_rate=death_r)
@@ -287,6 +282,7 @@ class TransformerDecoder(nn.Module):
         self.postprocess_layer = PrePostProcessing(self.model_size, 0, sequence='n')
 
         self.word_lut = embedding
+        self.multi_embedding = not hasattr(self.word_lut, 'weight')
 
         # Using feature embeddings in models
         self.language_embeddings = language_embeddings
@@ -365,7 +361,7 @@ class TransformerDecoder(nn.Module):
                 raise NotImplementedError
         return emb
 
-    def forward(self, input, context, src, input_lang=None, **kwargs):
+    def forward(self, input, context, src, tgt_lang=None, **kwargs):
         """
         Inputs Shapes:
             input: (Variable) batch_size x len_tgt (to be transposed)
@@ -379,7 +375,7 @@ class TransformerDecoder(nn.Module):
 
         """ Embedding: batch_size x len_tgt x d_model """
 
-        emb = self.process_embedding(input, input_lang)
+        emb = self.process_embedding(input, tgt_lang)
 
         if context is not None:
             if self.encoder_type == "audio":
@@ -438,7 +434,7 @@ class TransformerDecoder(nn.Module):
         context = decoder_state.context
         buffers = decoder_state.attention_buffers
         lang = decoder_state.tgt_lang
-        mask_src = decoder_state.src_mask
+        # mask_src = decoder_state.src_mask
 
         if decoder_state.concat_input_seq:
             if decoder_state.input_seq is None:
@@ -448,7 +444,7 @@ class TransformerDecoder(nn.Module):
                 decoder_state.input_seq = torch.cat([decoder_state.input_seq, input], 0)
             input = decoder_state.input_seq.transpose(0, 1)
 
-            src = decoder_state.src.transpose(0, 1) if decoder_state.src is not None else None
+        src = decoder_state.src.transpose(0, 1) if decoder_state.src is not None else None
 
         if input.size(1) > 1:
             input_ = input[:, -1].unsqueeze(1)
@@ -484,21 +480,20 @@ class TransformerDecoder(nn.Module):
 
         # batch_size x 1 x len_src
         if context is not None:
-            if mask_src is None:
-                if self.encoder_type == "audio":
-                    if src.data.dim() == 3:
-                        if self.encoder_cnn_downsampling:
-                            long_mask = src.data.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD)
-                            mask_src = long_mask[:, 0:context.size(0) * 4:4].unsqueeze(1)
-                        else:
-                            mask_src = src.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD).unsqueeze(1)
-                    elif self.encoder_cnn_downsampling:
-                        long_mask = src.eq(onmt.constants.PAD)
+            if self.encoder_type == "audio":
+                if src.dim() == 3:
+                    if self.encoder_cnn_downsampling:
+                        long_mask = src.data.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD)
                         mask_src = long_mask[:, 0:context.size(0) * 4:4].unsqueeze(1)
                     else:
-                        mask_src = src.eq(onmt.constants.PAD).unsqueeze(1)
+                        mask_src = src.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD).unsqueeze(1)
+                elif self.encoder_cnn_downsampling:
+                    long_mask = src.eq(onmt.constants.PAD)
+                    mask_src = long_mask[:, 0:context.size(0) * 4:4].unsqueeze(1)
                 else:
                     mask_src = src.eq(onmt.constants.PAD).unsqueeze(1)
+            else:
+                mask_src = src.eq(onmt.constants.PAD).unsqueeze(1)
         else:
             mask_src = None
 
@@ -547,11 +542,19 @@ class TransformerDecoder(nn.Module):
 class Transformer(NMTModel):
     """Main model in 'Attention is all you need' """
 
-    def __init__(self, encoder, decoder, generator=None, rec_decoder=None, rec_generator=None, mirror=False):
-        super().__init__(encoder, decoder, generator, rec_decoder, rec_generator)
+    def __init__(self, encoder, decoder, generator=None, rec_decoder=None, rec_generator=None,
+                 mirror=False, ctc=False):
+        super().__init__(encoder, decoder, generator, rec_decoder, rec_generator, ctc=ctc)
         self.model_size = self.decoder.model_size
         self.switchout = self.decoder.switchout
-        self.tgt_vocab_size = self.decoder.word_lut.weight.size(0)
+
+        if hasattr(self.decoder.word_lut, 'weight'):
+            self.multi_embedding = False
+            self.tgt_vocab_size = self.decoder.word_lut.weight.size(0)
+        else:
+            self.multi_embedding = True
+            self.tgt_vocab_sizes = self.decoder.word_lut.vocab_sizes
+        # self.decoder.multi_embedding = self.multi_embedding
 
         if self.encoder.input_type == 'text':
             self.src_vocab_size = self.encoder.word_lut.weight.size(0)
@@ -567,12 +570,30 @@ class Transformer(NMTModel):
         if self.reconstruct:
             self.rec_linear = nn.Linear(decoder.model_size, decoder.model_size)
 
+        if self.ctc:
+            if not self.multi_embedding:
+                self.ctc_linear = nn.Linear(encoder.model_size, self.tgt_vocab_size)
+            else:
+                self.ctc_linear = nn.ModuleDict()
+                for i in self.tgt_vocab_sizes:
+                    linear = nn.Linear(encoder.model_size, self.tgt_vocab_sizes[i])
+                    self.ctc_linear[str(i)] = linear
+
     def reset_states(self):
         return
 
+    def tie_weights(self):
+        if self.multi_embedding:
+            for i in self.tgt_vocab_sizes:
+                if hasattr(self.generator[0].linears[str(i)], 'weight'):
+                    self.generator[0].linears[str(i)].weight = self.decoder.word_lut.embeddings[str(i)].weight
+        else:
+            self.generator[0].linear.weight = self.decoder.word_lut.weight
+
     def forward(self, batch, target_mask=None, streaming=False, zero_encoder=False,
-                mirror=False, streaming_state=None):
+                mirror=False, streaming_state=None, nce=False):
         """
+        :param nce: use noise contrastive estimation
         :param streaming_state:
         :param streaming:
         :param mirror: if using mirror network for future anticipation
@@ -611,8 +632,10 @@ class Transformer(NMTModel):
         if zero_encoder:
             context.zero_()
 
-        decoder_output = self.decoder(tgt, context, src, input_lang=tgt_lang, input_pos=tgt_pos, streaming=streaming,
-                                      src_lengths=src_lengths, tgt_lengths=tgt_lengths, streaming_state=streaming_state)
+        decoder_output = self.decoder(tgt, context, src,
+                                      src_lang=src_lang, tgt_lang=tgt_lang, input_pos=tgt_pos, streaming=streaming,
+                                      src_lengths=src_lengths, tgt_lengths=tgt_lengths,
+                                      streaming_state=streaming_state)
 
         # update the streaming state again
         decoder_output = defaultdict(lambda: None, decoder_output)
@@ -627,11 +650,19 @@ class Transformer(NMTModel):
         output_dict['src'] = src
         output_dict['target_mask'] = target_mask
         output_dict['streaming_state'] = streaming_state
+        output_dict['target'] = batch.get('target_output')
+        output_dict['tgt_lang'] = tgt_lang
         # output_dict['lid_logits'] = decoder_output['lid_logits']
 
         # final layer: computing softmax
-        logprobs = self.generator[0](output_dict)
-        output_dict['logprobs'] = logprobs
+        if self.training and nce:
+            output_dict = self.generator[0](output_dict)
+        else:
+            if not self.multi_embedding:
+                logprobs = self.generator[0](output_dict)['logits']
+            else:
+                logprobs = self.generator[0](output_dict, tgt_lang)['logits']
+            output_dict['logprobs'] = logprobs
 
         # Mirror network: reverse the target sequence and perform backward language model
         if mirror:
@@ -643,14 +674,14 @@ class Transformer(NMTModel):
 
             tgt_reverse_input = tgt_reverse_input.transpose(0, 1)
             # perform an additional backward pass
-            reverse_decoder_output = self.mirror_decoder(tgt_reverse_input, context, src,
-                                                         input_lang=tgt_lang, input_pos=tgt_pos)
+            reverse_decoder_output = self.mirror_decoder(tgt_reverse_input, context, src, src_lang=src_lang,
+                                                         tgt_lang=tgt_lang, input_pos=tgt_pos)
 
             reverse_decoder_output['src'] = src
             reverse_decoder_output['context'] = context
             reverse_decoder_output['target_mask'] = target_mask
 
-            reverse_logprobs = self.mirror_generator[0](reverse_decoder_output)
+            reverse_logprobs = self.mirror_generator[0](reverse_decoder_output)['logits']
 
             output_dict['reverse_target'] = tgt_reverse_output
             output_dict['reverse_hidden'] = reverse_decoder_output['hidden']
@@ -669,9 +700,9 @@ class Transformer(NMTModel):
 
             src_input = src_input.transpose(0, 1)
             rec_context = self.rec_linear(output_dict['hidden'])  # T x B x H
-            rec_decoder_output = self.rec_decoder(src_input, rec_context, tgt, input_lang=src_lang, input_pos=src_pos)
+            rec_decoder_output = self.rec_decoder(src_input, rec_context, tgt, tgt_lang=src_lang, input_pos=src_pos)
             rec_output = rec_decoder_output['hidden']
-            rec_logprobs = self.rec_generator[0](rec_decoder_output)
+            rec_logprobs = self.rec_generator[0](rec_decoder_output)['logits']
 
             output_dict['rec_logprobs'] = rec_logprobs
             output_dict['rec_hidden'] = rec_output
@@ -679,6 +710,13 @@ class Transformer(NMTModel):
             output_dict['rec_target'] = src_output
         else:
             output_dict['reconstruct'] = False
+
+        # compute the logits for each encoder step
+        if self.ctc:
+            if not self.multi_embedding:
+                output_dict['encoder_logits'] = self.ctc_linear(output_dict['context'])
+            else:
+                output_dict['encoder_logits'] = self.ctc_linear[str(tgt_lang.item())](output_dict['context'])
 
         return output_dict
 
@@ -713,7 +751,8 @@ class Transformer(NMTModel):
         gold_scores = context.new(batch_size).zero_()
         gold_words = 0
         allgold_scores = list()
-        decoder_output = self.decoder(tgt_input, context, src, input_lang=tgt_lang, input_pos=tgt_pos)['hidden']
+        decoder_output = self.decoder(tgt_input, context, src, tgt_lang=tgt_lang, src_lang=src_lang,
+                                      input_pos=tgt_pos)['hidden']
 
         output = decoder_output
 
@@ -729,9 +768,9 @@ class Transformer(NMTModel):
             dec_out['context'] = context
 
             if isinstance(self.generator, nn.ModuleList):
-                gen_t = self.generator[0](dec_out)
+                gen_t = self.generator[0](dec_out)['logits']
             else:
-                gen_t = self.generator(dec_out)
+                gen_t = self.generator(dec_out)['logits']
             gen_t = F.log_softmax(gen_t, dim=-1, dtype=torch.float32)
             gen_t = gen_t.squeeze(0)
             tgt_t = tgt_t.unsqueeze(1)
@@ -761,7 +800,7 @@ class Transformer(NMTModel):
         output_dict['src'] = decoder_state.src.transpose(0, 1)
 
         # squeeze to remove the time step dimension
-        log_prob = self.generator[0](output_dict).squeeze(0)
+        log_prob = self.generator[0](output_dict)['logits'].squeeze(0)
         log_prob = F.log_softmax(log_prob, dim=-1, dtype=torch.float32)
 
         coverage = output_dict['coverage']
@@ -789,9 +828,10 @@ class Transformer(NMTModel):
         tgt_lang = batch.get('target_lang')
 
         src_transposed = src.transpose(0, 1)
+        print(src.size())
 
         encoder_output = self.encoder(src_transposed, input_pos=src_pos, input_lang=src_lang)
-        decoder_state = TransformerDecodingState(src, tgt_lang, encoder_output['context'], encoder_output['src_mask'],
+        decoder_state = TransformerDecodingState(src, tgt_lang, encoder_output['context'], src_lang,
                                                  beam_size=beam_size, model_size=self.model_size,
                                                  type=type, buffering=buffering)
 
@@ -808,8 +848,20 @@ class Transformer(NMTModel):
 
 class TransformerDecodingState(DecoderState):
 
-    def __init__(self, src, tgt_lang, context, src_mask, beam_size=1, model_size=512, type=2,
+    def __init__(self, src, tgt_lang, context, src_lang, beam_size=1, model_size=512, type=2,
                  cloning=True, buffering=False):
+
+        """
+        :param src:
+        :param tgt_lang:
+        :param context:
+        :param src_lang:
+        :param beam_size:
+        :param model_size:
+        :param type: Type 1 is for old translation code. Type 2 is for fast buffering. (Type 2 default).
+        :param cloning:
+        :param buffering:
+        """
 
         self.beam_size = beam_size
         self.model_size = model_size
@@ -824,7 +876,10 @@ class TransformerDecodingState(DecoderState):
 
             if src is not None:
                 if src.dim() == 3:
+                    # print(self.src.size())
                     self.src = src.narrow(2, 0, 1).squeeze(2).repeat(1, beam_size)
+                    # self.src = src.repeat(1, beam_size, 1)
+                    # print(self.src.size())
                     # self.src = src.repeat(1, beam_size, 1) # T x Bb x c
                 else:
                     self.src = src.repeat(1, beam_size)
@@ -837,7 +892,7 @@ class TransformerDecodingState(DecoderState):
                 self.context = None
 
             self.input_seq = None
-            self.src_mask = None
+            self.src_lang = src_lang
             self.tgt_lang = tgt_lang
 
         elif type == 2:
@@ -853,17 +908,18 @@ class TransformerDecodingState(DecoderState):
                 else:
                     self.context = None
 
-                if src_mask is not None:
-                    self.src_mask = src_mask.index_select(0, new_order)
-                else:
-                    self.src_mask = None
+                # if src_mask is not None:
+                #     self.src_mask = src_mask.index_select(0, new_order)
+                # else:
+                #     self.src_mask = None
             else:
                 self.context = context
                 self.src = src
-                self.src_mask = src_mask
+                # self.src_mask = src_mask
 
             self.concat_input_seq = False
             self.tgt_lang = tgt_lang
+            self.src_lang = src_lang
 
         else:
             raise NotImplementedError
@@ -953,8 +1009,8 @@ class TransformerDecodingState(DecoderState):
         if self.context is not None:
             self.context = self.context.index_select(1, reorder_state)
 
-        if self.src_mask is not None:
-            self.src_mask = self.src_mask.index_select(0, reorder_state)
+        # if self.src_mask is not None:
+        #     self.src_mask = self.src_mask.index_select(0, reorder_state)
         self.src = self.src.index_select(1, reorder_state)
 
         for l in self.attention_buffers:

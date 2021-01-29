@@ -2,9 +2,22 @@ import torch
 import torch.nn.functional as F
 from onmt.constants import double_precision
 
+try:
+    import apex.amp as amp
+    from apex.amp import half_function
+except (ModuleNotFoundError, ImportError) as e:
+    amp = None
+    from .compat import half_function
+
+try:
+    from torch.cuda.amp import custom_fwd, custom_bwd
+except (ModuleNotFoundError, ImportError) as e:
+    from .compat import custom_fwd, custom_bwd
+
 
 class EncdecAttnFunc(torch.autograd.Function):
     @staticmethod
+    @custom_fwd(cast_inputs=torch.float16)
     def forward(ctx, use_time_mask, is_training, heads, inputs_q, inputs_kv,
                 input_weights_q, input_weights_kv, output_weights,
                 mask, dropout_prob,
@@ -96,9 +109,12 @@ class EncdecAttnFunc(torch.autograd.Function):
             matmul1_results = matmul1_results.masked_fill_(mask, float('-inf'))
             matmul1_results = matmul1_results.view(bsz * heads, seql_q, seql_k)
 
-        dtype_ = torch.float64
+        dtype_ = torch.float64 if double_precision else torch.float32
         softmax_results = F.softmax(matmul1_results, dim=-1, dtype=dtype_).type_as(matmul1_results)
-        # softmax_results = F.softmax(matmul1_results.float(), dim=-1).type_as(matmul1_results)
+
+        nan_mask = torch.isnan(softmax_results)
+        if nan_mask.any():
+            softmax_results.masked_fill_(nan_mask, 0)
 
         # Dropout - is not executed for inference
         if is_training:
@@ -145,19 +161,20 @@ class EncdecAttnFunc(torch.autograd.Function):
                               input_weights_q,
                               input_weights_kv,
                               output_weights,
-                              dropout_mask,
+                              dropout_mask, nan_mask,
                               dropout_prob_t)
 
         return outputs.detach(), softmax_results.detach()
 
     @staticmethod
+    @custom_bwd
     def backward(ctx, output_grads, softmax_grads):
 
         heads_t, scale_t, matmul2_results, dropout_results, softmax_results \
             , input_lin_q_results, input_lin_kv_results \
             , inputs_q, inputs_kv \
             , input_weights_q, input_weights_kv, output_weights \
-            , dropout_mask, dropout_prob_t \
+            , dropout_mask, nan_mask, dropout_prob_t \
             = ctx.saved_tensors
 
         head_dim = inputs_q.size(2) // heads_t[0]
@@ -214,6 +231,9 @@ class EncdecAttnFunc(torch.autograd.Function):
 
         # Mask and Scaling for Dropout (not a publically documented op)
         dropout_grads = torch._masked_scale(matmul2_dgrad1, dropout_mask, 1.0 / (1.0 - dropout_prob_t[0]))
+
+        if nan_mask.any():
+            dropout_grads.masked_fill_(nan_mask, 0)
 
         # Softmax Grad (not a publically documented op)
         softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, softmax_results)
@@ -272,4 +292,33 @@ class EncdecAttnFunc(torch.autograd.Function):
             , None, None, None, None
 
 
-encdec_attn_func = EncdecAttnFunc.apply
+@half_function
+def encdec_attn_func(time_masking, is_training,
+                     num_heads, query, key,
+                     in_proj_weight_q, in_proj_weight_kv,
+                     out_proj_weight, attn_mask, dropout,
+                     incremental, incremental_cache):
+    output, coverage = EncdecAttnFunc.apply(time_masking, is_training,
+                                            num_heads, query, key,
+                                            in_proj_weight_q, in_proj_weight_kv,
+                                            out_proj_weight, attn_mask, dropout,
+                                            incremental, incremental_cache)
+
+    return output, coverage
+
+
+@half_function
+def fast_encdec_attn_func(time_masking, is_training, num_heads, query, key,
+                          in_proj_weight_q, in_proj_weight_kv,
+                          out_proj_weight,
+                          attn_mask, dropout):
+    try:
+        from apex.contrib.multihead_attn.fast_encdec_multihead_attn_func import fast_encdec_attn_func as attn
+        from .encdec_attention_func_fused import fast_encdec_attn_func as attn
+    except ModuleNotFoundError as e:
+        print("Cannot use fast self-attention implementation")
+
+    return attn(time_masking, is_training, num_heads, query, key,
+                in_proj_weight_q, in_proj_weight_kv,
+                out_proj_weight,
+                attn_mask, dropout)

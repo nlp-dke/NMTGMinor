@@ -45,7 +45,7 @@ class RelativeSelfMultiheadAttn(nn.Module):
         self.out_proj_weight = Parameter(torch.Tensor(embed_dim, embed_dim))
         self.pos_proj_weight = Parameter(torch.Tensor(embed_dim, embed_dim))
 
-        self.in_proj_bias = Parameter(torch.Tensor(3*embed_dim))
+        self.in_proj_bias = Parameter(torch.Tensor(3 * embed_dim))
         self.out_proj_bias = Parameter(torch.Tensor(embed_dim))
         self.pos_proj_bias = Parameter(torch.Tensor(embed_dim))
 
@@ -55,28 +55,46 @@ class RelativeSelfMultiheadAttn(nn.Module):
         self.reset_parameters()
         self.attn_func = relative_self_attn_func
 
-    def reset_parameters(self):
+    def reset_parameters(self, init='normal'):
         # nn.init.xavier_uniform_(self.in_proj_weight, gain=math.sqrt(2))
         # nn.init.xavier_uniform_(self.out_proj_weight)
-        std_ = math.sqrt(2.0 / (self.embed_dim + self.embed_dim))
-        nn.init.normal_(self.in_proj_weight, 0.0, std_)
-        nn.init.normal_(self.out_proj_weight, 0.0, std_)
-        nn.init.normal_(self.pos_proj_weight, 0.0, std_)
+        if init == 'normal':  # xavier normal
+            std_ = math.sqrt(2.0 / (self.embed_dim + self.embed_dim))
+            nn.init.normal_(self.in_proj_weight, 0.0, std_)
+            nn.init.normal_(self.out_proj_weight, 0.0, std_)
+            nn.init.normal_(self.pos_proj_weight, 0.0, std_)
+
+        else:
+            std_ = math.sqrt(6.0 / (self.embed_dim + self.embed_dim))
+            nn.init.uniform_(self.in_proj_weight, -std_, std_)
+            nn.init.uniform_(self.out_proj_weight, -std_, std_)
+            nn.init.uniform_(self.pos_proj_weight, -std_, std_)
 
         nn.init.constant_(self.in_proj_bias, 0.)
         nn.init.constant_(self.out_proj_bias, 0.)
         nn.init.constant_(self.pos_proj_bias, 0.)
 
-        nn.init.normal_(self.r_w_bias, 0.0, std_)
-        nn.init.normal_(self.r_r_bias, 0.0, std_)
+        nn.init.normal_(self.r_w_bias, 0.0, 0.02)
+        nn.init.normal_(self.r_r_bias, 0.0, 0.02)
 
     def forward(self, input, pos, key_padding_mask=None, attn_mask=None, mems=None,
                 incremental=False, incremental_cache=None):
+        """
+        :param input: [T x B x H]
+        :param pos:
+        :param key_padding_mask: [1 x T x B]
+        :param attn_mask: [T x T]
+        :param mems:
+        :param incremental:
+        :param incremental_cache:
+        :return:
+        """
 
         if key_padding_mask is not None:
             assert (attn_mask is None), "ERROR attn_mask and key_padding_mask should not be both defined!"
             mask = key_padding_mask
             if len(mask.shape) == 3:
+                # [1 x T x B] -> [B x T]
                 mask = mask.squeeze(0).transpose(0, 1)
         elif attn_mask is not None:
             mask = attn_mask

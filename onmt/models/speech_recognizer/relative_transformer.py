@@ -2,20 +2,28 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from onmt.models.transformer_layers import PositionalEncoding, PrePostProcessing
+from onmt.models.transformer_layers import PositionalEncoding
+from onmt.modules.pre_post_processing import PrePostProcessing
 from onmt.models.transformers import TransformerEncoder, TransformerDecoder, Transformer, TransformerDecodingState
 from onmt.modules.sinusoidal_positional_encoding import SinusoidalPositionalEmbedding
 import onmt
 from onmt.modules.base_seq2seq import NMTModel, Reconstructor, DecoderState
 from onmt.modules.dropout import embedded_dropout
-from onmt.models.transformer_layers import XavierLinear, MultiHeadAttention, FeedForward, PrePostProcessing
 from .relative_transformer_layers import RelativeTransformerEncoderLayer, RelativeTransformerDecoderLayer
 from onmt.utils import flip, expected_length
 from collections import defaultdict
 import math
 import sys
+from torch.utils.checkpoint import checkpoint
 
 torch.set_printoptions(threshold=500000)
+
+
+def create_forward_function(module):
+    def forward_pass(*inputs):
+        return module(*inputs)
+
+    return forward_pass
 
 
 class SpeechTransformerEncoder(TransformerEncoder):
@@ -32,6 +40,12 @@ class SpeechTransformerEncoder(TransformerEncoder):
         self.reversible = opt.src_reversible
         self.n_heads = opt.n_heads
         self.fast_self_attn = opt.fast_self_attention
+        self.checkpointing = opt.checkpointing
+        self.mpw = opt.multilingual_partitioned_weights
+        self.multilingual_linear_projection = opt.multilingual_linear_projection
+        self.mln = opt.multilingual_layer_norm
+
+        # TODO: multilingually linear transformation
 
         # build_modules will be called from the inherited constructor
         super().__init__(opt, dicts, positional_encoder, encoder_type, language_embeddings)
@@ -44,6 +58,16 @@ class SpeechTransformerEncoder(TransformerEncoder):
             self.positional_encoder = SinusoidalPositionalEmbedding(opt.model_size)
 
         self.d_head = self.model_size // self.n_heads
+
+        if self.multilingual_linear_projection:
+            self.linear_proj = nn.Parameter(torch.Tensor(opt.n_languages, self.model_size, self.model_size))
+
+            std_ = math.sqrt(2.0 / (self.model_size + self.model_size))
+            torch.nn.init.normal_(self.linear_proj, 0.0, std_)
+
+        self.mln = opt.multilingual_layer_norm
+        self.postprocess_layer = PrePostProcessing(opt.model_size, opt.dropout, sequence='n', multilingual=self.mln,
+                                                   n_languages=opt.n_languages)
 
     def build_modules(self):
 
@@ -58,91 +82,50 @@ class SpeechTransformerEncoder(TransformerEncoder):
             # linearly decay the death rate
             death_r = (_l + 1.0) / self.layers * self.death_rate
 
-            if not self.reversible:
-                block = RelativeTransformerEncoderLayer(self.opt, death_rate=death_r)
-            else:
-                block = ReversibleTransformerEncoderLayer(self.opt, death_rate=death_r)
-
+            block = RelativeTransformerEncoderLayer(self.opt, death_rate=death_r)
             self.layer_modules.append(block)
 
     def forward(self, input, input_pos=None, input_lang=None, streaming=False, **kwargs):
         """
-        Inputs Shapes:
-            input: batch_size x src_len (wanna tranpose)
-        Outputs Shapes:
-            out: batch_size x src_len x d_model
-            mask_src
+        :param input: [B x T x Input_Size]
+        :param input_pos: [B x T] positions
+        :param input_lang: [B] language ids of each sample
+        :param streaming: connect different segments in transformer-xl style
+        :param kwargs:
+        :return:
         """
 
-        """ Embedding: batch_size x src_len x d_model """
-        if self.input_type == "text":
-            bsz_first_input = input
-            input = input.transpose(0, 1)
-            # mask_src = input.eq(onmt.constants.PAD).unsqueeze(1)  # batch_size x src_len x 1 for broadcasting
-
-            dec_attn_mask = bsz_first_input.eq(onmt.constants.PAD).unsqueeze(1)
-
-            if streaming:
-                streaming_state = kwargs.get('streaming_state', None)
-                mems = streaming_state.src_mems
-                # mem_len = streaming_state.src_mems[0].size(0)
-                # mem_len = streaming_state.prev_src_mem_size
-                mem_len = mems[0].size(0) if mems is not None else 0
-                input_length = kwargs.get('src_lengths', None)
-                streaming_state = kwargs.get('streaming_state', None)
-                mask_src = self.create_stream_mask(input, input_length, mem_len)
-                mask_src = mask_src.unsqueeze(2)
-            else:
-                mem_len = 0
-                mask_src = input.eq(onmt.constants.PAD).unsqueeze(0)  # batch_size x src_len x 1 for broadcasting
-                mems = None
-
-            emb = embedded_dropout(self.word_lut, input, dropout=self.word_dropout if self.training else 0)
-
-            """ Adding language embeddings """
-            if self.use_language_embedding:
-                assert self.language_embedding is not None
-                # There is no "unsqueeze" here because the input is T x B x H and lang_emb is B x H
-                if self.language_embedding_type in ['sum', 'all_sum']:
-                    lang_emb = self.language_embedding(input_lang)
-                    # print(lang_emb.size(), emb.size())
-                    emb = emb + lang_emb.unsqueeze(0)
-
+        if not self.cnn_downsampling:
+            mask_src = input.narrow(2, 0, 1).squeeze(2).transpose(0, 1).eq(onmt.constants.PAD).unsqueeze(0)
+            dec_attn_mask = input.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD).unsqueeze(1)
+            input = input.narrow(2, 1, input.size(2) - 1)
+            emb = self.audio_trans(input.contiguous().view(-1, input.size(2))).view(input.size(0),
+                                                                                    input.size(1), -1)
+            emb = emb.type_as(input)
         else:
-            if streaming:
-                raise NotImplementedError
+            long_mask = input.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD)
+            input = input.narrow(2, 1, input.size(2) - 1)
 
-            if not self.cnn_downsampling:
-                mask_src = input.narrow(2, 0, 1).squeeze(2).transpose(0, 1).eq(onmt.constants.PAD).unsqueeze(0)
-                dec_attn_mask = input.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD).unsqueeze(1)
-                input = input.narrow(2, 1, input.size(2) - 1)
-                emb = self.audio_trans(input.contiguous().view(-1, input.size(2))).view(input.size(0),
-                                                                                        input.size(1), -1)
-                emb = emb.type_as(input)
-            else:
-                long_mask = input.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD)
-                input = input.narrow(2, 1, input.size(2) - 1)
+            # first resizing to fit the CNN format
+            # note that this is actually conv2d so channel=1, f=40
+            input = input.view(input.size(0), input.size(1), -1, self.channels)
+            input = input.permute(0, 3, 1, 2)  # [bsz, channels, time, f]
 
-                # first resizing to fit the CNN format
-                input = input.view(input.size(0), input.size(1), -1, self.channels)
-                input = input.permute(0, 3, 1, 2)
+            # apply CNN
+            input = self.audio_trans(input)
+            input = input.permute(0, 2, 1, 3).contiguous()
+            input = input.view(input.size(0), input.size(1), -1)
+            input = self.linear_trans(input)
+            dec_attn_mask = long_mask[:, 0:input.size(1) * 4:4].unsqueeze(1)
+            mask_src = long_mask[:, 0:input.size(1) * 4:4].transpose(0, 1).unsqueeze(0)
+            # the size seems to be B x T ?
+            emb = input
 
-                input = self.audio_trans(input)
-                input = input.permute(0, 2, 1, 3).contiguous()
-                input = input.view(input.size(0), input.size(1), -1)
-                # print(input.size())
-                input = self.linear_trans(input)
-
-                mask_src = long_mask[:, 0:input.size(1) * 4:4].transpose().unsqueeze(0)
-                dec_attn_mask = long_mask[:, 0:input.size(1) * 4:4].unsqueeze(1)
-                # the size seems to be B x T ?
-                emb = input
-
-            emb = emb.transpose(0, 1)
-            input = input.transpose(0, 1)
-            abs_pos = None
-            mem_len = 0
-            mems = None
+        emb = emb.transpose(0, 1)
+        input = input.transpose(0, 1)
+        abs_pos = None
+        mem_len = 0
+        mems = None
 
         if self.unidirectional:
             qlen = input.size(0)
@@ -156,8 +139,7 @@ class SpeechTransformerEncoder(TransformerEncoder):
             # dec_attn_mask = dec_attn_mask + pad_mask.unsqueeze(0)
             mask_src = mask_src.gt(0)
 
-        if onmt.constants.torch_version >= 1.2:
-            mask_src = mask_src.bool()
+        mask_src = mask_src.bool()
 
         """ Scale the emb by sqrt(d_model) """
         emb = emb * math.sqrt(self.model_size)
@@ -173,7 +155,7 @@ class SpeechTransformerEncoder(TransformerEncoder):
             pos = torch.arange(klen - 1, -klen, -1.0, device=emb.device, dtype=emb.dtype)
 
         # pos_emb has size 2T+1 x 1 x H
-        pos_emb = self.positional_encoder(pos, bsz=input.size(1) if self.fast_self_attn else None)
+        pos_emb = self.positional_encoder(pos, bsz=input.size(1))
 
         if self.learnable_position_encoding:
             raise NotImplementedError
@@ -189,6 +171,10 @@ class SpeechTransformerEncoder(TransformerEncoder):
 
         pos_emb = self.preprocess_layer(pos_emb)
 
+        if self.mpw:
+            input_lang = self.factor_embeddings(input_lang).squeeze(0)
+            assert input_lang.ndim == 1
+
         if self.reversible:
             context = torch.cat([context, context], dim=-1)
 
@@ -200,13 +186,27 @@ class SpeechTransformerEncoder(TransformerEncoder):
                 # src_len x batch_size x d_model
 
                 mems_i = mems[i] if mems is not None and streaming and self.max_memory_size > 0 else None
-                context = layer(context, pos_emb, mask_src, mems=mems_i)
+
+                if self.checkpointing == 0 or self.training is False:
+                    context = layer(context, pos_emb, mask_src, mems=mems_i, src_lang=input_lang)
+                else:
+                    incremental = False
+                    incremental_cache = None
+
+                    context = checkpoint(create_forward_function(layer), context, pos_emb, mask_src, input_lang)
 
                 if streaming:
                     hids.append(context)
 
         # final layer norm
-        context = self.postprocess_layer(context)
+        context = self.postprocess_layer(context, factor=input_lang)
+
+        if self.multilingual_linear_projection:
+            language_linear_weight_ = torch.index_select(self.linear_proj, 0, input_lang).squeeze(0)
+            # context = F.linear(context, language_linear_weight_)
+            t, b = context.size(0), context.size(1)
+            context = torch.mm(context.view(-1, context.size(-1)), language_linear_weight_)
+            context = context.view(t, b, context.size(-1))
 
         output_dict = defaultdict(lambda: None, {'context': context, 'src_mask': dec_attn_mask, 'src': input})
 
@@ -230,6 +230,7 @@ class SpeechTransformerDecoder(TransformerDecoder):
         self.n_heads = opt.n_heads
         self.fast_self_attn = opt.fast_self_attention
         self.lfv_multilingual = opt.lfv_multilingual
+        self.mpw = opt.multilingual_partitioned_weights
 
         # build_modules will be called from the inherited constructor
         super().__init__(opt, dicts, positional_encoder, language_embeddings,
@@ -238,8 +239,12 @@ class SpeechTransformerDecoder(TransformerDecoder):
         self.positional_encoder = SinusoidalPositionalEmbedding(opt.model_size)
         self.d_head = self.model_size // self.n_heads
         # Parameters for the position biases - deprecated. kept for backward compatibility
-        self.r_w_bias = nn.Parameter(torch.Tensor(self.n_heads, self.d_head))
-        self.r_r_bias = nn.Parameter(torch.Tensor(self.n_heads, self.d_head))
+        # self.r_w_bias = nn.Parameter(torch.Tensor(self.n_heads, self.d_head))
+        # self.r_r_bias = nn.Parameter(torch.Tensor(self.n_heads, self.d_head))
+
+        self.mln = opt.multilingual_layer_norm
+        self.postprocess_layer = PrePostProcessing(opt.model_size, opt.dropout, sequence='n', multilingual=self.mln,
+                                                   n_languages=opt.n_languages)
 
     def renew_buffer(self, new_len):
         return
@@ -249,10 +254,7 @@ class SpeechTransformerDecoder(TransformerDecoder):
         e_length = expected_length(self.layers, 0.0)
         self.opt.ignore_source = self.ignore_source
         opt = self.opt
-        if self.reversible:
-            print("* Transformer Reversible Decoder with Relative Attention with %.2f layers" % e_length)
-        else:
-            print("* Transformer Decoder with Relative Attention with %.2f layers" % e_length)
+        print("* Speech Transformer Decoder with Relative Attention with %.2f layers" % e_length)
 
         self.layer_modules = nn.ModuleList()
 
@@ -262,12 +264,9 @@ class SpeechTransformerDecoder(TransformerDecoder):
 
             from .relative_transformer_layers import LIDFeedForward
             lid_network = LIDFeedForward(opt.model_size, 2 * opt.model_size, opt.bottleneck_size,
-                                          opt.n_languages, dropout=opt.dropout)
+                                         opt.n_languages, dropout=opt.dropout)
 
-            if not self.reversible:
-                block = RelativeTransformerDecoderLayer(self.opt, death_rate=death_r, lid_net=lid_network)
-            else:
-                block = ReversibleTransformerDecoderLayer(self.opt, death_rate=death_r)
+            block = RelativeTransformerDecoderLayer(self.opt, death_rate=death_r, lid_net=lid_network)
 
             self.layer_modules.append(block)
 
@@ -278,7 +277,8 @@ class SpeechTransformerDecoder(TransformerDecoder):
     # TODO: merging forward_stream and forward
     # TODO: write a step function for encoder
 
-    def forward(self, input, context, src, input_pos=None, input_lang=None, streaming=False, **kwargs):
+    def forward(self, input, context, src, input_pos=None,
+                src_lang=None, tgt_lang=None, streaming=False, **kwargs):
         """
                 Inputs Shapes:
                     input: (Variable) batch_size x len_tgt (wanna tranpose)
@@ -292,7 +292,13 @@ class SpeechTransformerDecoder(TransformerDecoder):
 
         """ Embedding: batch_size x len_tgt x d_model """
         input = input.transpose(0, 1)  # T x B
-        emb = embedded_dropout(self.word_lut, input, dropout=self.word_dropout if self.training else 0)
+        if not self.multi_embedding:
+            word_lut = self.word_lut
+        else:
+            word_lut = self.word_lut.embeddings[str(tgt_lang.item())]
+
+        emb = embedded_dropout(word_lut, input, dropout=self.word_dropout if self.training else 0)
+
         emb = emb * math.sqrt(self.model_size)
 
         mem_len = 0
@@ -300,7 +306,8 @@ class SpeechTransformerDecoder(TransformerDecoder):
         extra_context = None
 
         if self.use_language_embedding:
-            lang_emb = self.language_embeddings(input_lang)  # B x H or 1 x H
+            # print("Using language embedding")
+            lang_emb = self.language_embeddings(tgt_lang)  # B x H or 1 x H
             if self.language_embedding_type == 'sum':
                 emb = emb + lang_emb
             elif self.language_embedding_type == 'concat':
@@ -328,36 +335,41 @@ class SpeechTransformerDecoder(TransformerDecoder):
 
         qlen = input.size(0)
         klen = qlen + mem_len
-        # preparing self-attention mask. The input is either left or right aligned
+        # preparing self-attention mask. The input must be left-aligned
 
         dec_attn_mask = torch.triu(
             emb.new_ones(qlen, klen), diagonal=1 + mem_len).byte()[:, :, None]
-        # pad_mask = input.eq(onmt.constants.PAD).byte()  # L x B
-        #
-        # dec_attn_mask = dec_attn_mask + pad_mask.unsqueeze(0)
-        # dec_attn_mask = dec_attn_mask.gt(0)
+
         dec_attn_mask = dec_attn_mask.bool()
 
         pos = torch.arange(klen - 1, -1, -1.0, device=emb.device, dtype=emb.dtype)
 
-        pos_emb = self.positional_encoder(pos, bsz=input.size(1) if self.fast_self_attn else None)
+        pos_emb = self.positional_encoder(pos, bsz=input.size(1))
         output = self.preprocess_layer(emb.contiguous())
         pos_emb = self.preprocess_layer(pos_emb)
 
         lfv_vector, lid_logits = None, list()
 
+        if self.mpw:
+            src_lang = self.factor_embeddings(src_lang).squeeze(0)
+            tgt_lang = self.factor_embeddings(tgt_lang).squeeze(0)
+            assert src_lang.ndim == 1 and tgt_lang.ndim == 1
+
         for i, layer in enumerate(self.layer_modules):
-            # batch_size x src_len x d_model output, coverage = layer(output, context, pos_emb, self.r_w_bias,
-            # self.r_r_bias, dec_attn_mask, mask_src)
             if self.lfv_multilingual:
                 output, coverage, _, lid_logits_, lfv_vector = \
-                    layer(output, context, pos_emb, lfv_vector, dec_attn_mask, mask_src, None)
-                # print(lid_logits_.size(), lfv_vector.size())
+                    layer(output, context, pos_emb, lfv_vector, dec_attn_mask, mask_src,
+                          src_lang=src_lang, tgt_lang=tgt_lang)
                 lid_logits.append(lid_logits_)
             else:
-                output, coverage, _ = layer(output, context, pos_emb, lfv_vector, dec_attn_mask, mask_src, None)
+                output, coverage, _ = layer(output, context, pos_emb, lfv_vector, dec_attn_mask, mask_src,
+                                            src_lang=src_lang, tgt_lang=tgt_lang)
 
-        output = self.postprocess_layer(output)
+        output = self.postprocess_layer(output, factor=tgt_lang)
+
+        nan_mask = torch.logical_or(torch.isnan(output), torch.isinf(output))
+        if nan_mask.any():
+            output.masked_fill_(nan_mask, 0)
 
         output_dict = {'hidden': output, 'coverage': coverage, 'context': context, 'lid_logits': lid_logits}
         output_dict = defaultdict(lambda: None, output_dict)
@@ -376,11 +388,10 @@ class SpeechTransformerDecoder(TransformerDecoder):
             coverage: batch_size x len_tgt x src_len
 
         """
-
         context = decoder_state.context
         buffers = decoder_state.attention_buffers
         lang = decoder_state.tgt_lang
-        mask_src = decoder_state.src_mask
+        src_lang = decoder_state.src_lang
         buffering = decoder_state.buffering
 
         if decoder_state.concat_input_seq:
@@ -403,7 +414,11 @@ class SpeechTransformerDecoder(TransformerDecoder):
             input_ = input.transpose(0, 1)  # from B x T to T x B
 
         """ Embedding: batch_size x 1 x d_model """
-        emb = self.word_lut(input_) * math.sqrt(self.model_size)
+        if not self.multi_embedding:
+            word_lut = self.word_lut
+        else:
+            word_lut = self.word_lut.embeddings[str(lang.item())]
+        emb = word_lut(input_) * math.sqrt(self.model_size)
         input = input.transpose(0, 1)
         klen = input.size(0)
         # emb = self.word_lut(input) * math.sqrt(self.model_size)
@@ -432,23 +447,27 @@ class SpeechTransformerDecoder(TransformerDecoder):
         pos_emb = self.positional_encoder(pos)
 
         dec_attn_mask = torch.triu(
-            emb.new_ones(qlen, klen), diagonal=1 + mlen).byte()[:, :, None]
+            emb.new_ones(klen, klen), diagonal=1 + mlen).byte()  # [:, :, None]
 
-        # pad_mask = input.eq(onmt.constants.PAD).byte()  # L x B
+        dec_attn_mask = dec_attn_mask[-1].unsqueeze(0)
 
-        # dec_attn_mask = dec_attn_mask + pad_mask.unsqueeze(0)
-        # dec_attn_mask = dec_attn_mask.gt(0)
-
-        if onmt.constants.torch_version >= 1.2:
-            dec_attn_mask = dec_attn_mask.bool()
+        dec_attn_mask = dec_attn_mask.bool()
 
         if context is not None:
             if self.encoder_type == "audio":
-                if not self.encoder_cnn_downsampling:
-                    mask_src = src.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD).unsqueeze(1)
-                else:
-                    long_mask = src.data.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD)
+                # The "slow" version of translator only keeps the source mask of audio as src
+                # Thats why we need to check if the src has already been narrowed before
+                if src.dim() == 3:
+                    if not self.encoder_cnn_downsampling:
+                        mask_src = src.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD).unsqueeze(1)
+                    else:
+                        long_mask = src.data.narrow(2, 0, 1).squeeze(2).eq(onmt.constants.PAD)
+                        mask_src = long_mask[:, 0:context.size(0) * 4:4].unsqueeze(1)
+                elif self.encoder_cnn_downsampling:
+                    long_mask = src.eq(onmt.constants.PAD)
                     mask_src = long_mask[:, 0:context.size(0) * 4:4].unsqueeze(1)
+                else:
+                    mask_src = src.eq(onmt.constants.PAD).unsqueeze(1)
             else:
 
                 mask_src = src.eq(onmt.constants.PAD).unsqueeze(1)
@@ -457,34 +476,29 @@ class SpeechTransformerDecoder(TransformerDecoder):
 
         output = emb.contiguous()
 
-        if self.reversible:
-            output_1, output_2 = output, output
+        lfv_vector, lid_logits = None, list()
 
         for i, layer in enumerate(self.layer_modules):
             buffer = buffers[i] if i in buffers else None
 
-            if self.reversible:
-                if buffering:
-                    output_1, output_2, coverage, buffer = layer(output_1, output_2, pos_emb, context,
-                                                                 dec_attn_mask, mask_src, incremental=True,
-                                                                 incremental_cache=buffer)
-                    decoder_state.update_attention_buffer(buffer, i)
-                else:
-                    output_1, output_2, coverage, _ = layer(output_1, output_2, pos_emb, context,
-                                                            dec_attn_mask, mask_src)
+            if buffering:
+                # print("DEBUGGING BUFFERING")
+                output, coverage, buffer = layer(output, context, pos_emb, None, dec_attn_mask, mask_src,
+                                                 tgt_lang=lang, src_lang=src_lang,
+                                                 incremental=True, incremental_cache=buffer)
+                decoder_state.update_attention_buffer(buffer, i)
             else:
-                if buffering:
-                    output, coverage, buffer = layer(output, context, pos_emb, dec_attn_mask, mask_src,
-                                                     incremental=True, incremental_cache=buffer)
-                    decoder_state.update_attention_buffer(buffer, i)
+                if self.lfv_multilingual:
+                    output, coverage, _, lid_logits_, lfv_vector = \
+                        layer(output, context, pos_emb, lfv_vector, dec_attn_mask, mask_src,
+                              tgt_lang=lang, src_lang=src_lang)
+                    lid_logits.append(lid_logits_)
                 else:
-                    output, coverage, _ = layer(output, context, pos_emb, dec_attn_mask, mask_src)
-
-        if self.reversible:
-            output = output_1 + output_2
+                    output, coverage, _ = layer(output, context, pos_emb, lfv_vector, dec_attn_mask, mask_src,
+                                                tgt_lang=lang, src_lang=src_lang)
 
         # normalize and take the last time step
-        output = self.postprocess_layer(output)
+        output = self.postprocess_layer(output, factor=lang)
         output = output[-1].unsqueeze(0)
 
         output_dict = defaultdict(lambda: None)

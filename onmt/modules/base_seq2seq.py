@@ -31,7 +31,7 @@ class Generator(nn.Module):
         target_mask = output_dicts['target_mask']
 
         if not fix_norm:
-            logits = self.linear(input).float()
+            logits = self.linear(input)
         else:
             normalized_weights = F.normalize(self.linear.weight, dim=-1)
             normalized_bias = self.linear.bias
@@ -39,18 +39,21 @@ class Generator(nn.Module):
 
         # softmax will be done at the loss function
         # output = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-        return logits
+        output_dicts['logits'] = logits
+        return output_dicts
         
 
 class NMTModel(nn.Module):
 
-    def __init__(self, encoder, decoder, generator=None, rec_decoder=None, rec_generator=None, mirror=False):
+    def __init__(self, encoder, decoder, generator=None, rec_decoder=None, rec_generator=None,
+                 mirror=False, ctc=False):
         super(NMTModel, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.generator = generator
         self.rec_decoder = rec_decoder
         self.rec_generator = rec_generator
+        self.ctc = ctc
 
         if self.rec_decoder:
             self.rec_decoder.word_lut.weight = self.encoder.word_lut.weight
@@ -74,6 +77,8 @@ class NMTModel(nn.Module):
         """
         override this method to have back-compatibility
         """
+
+        model_dict = self.state_dict()
         
         def condition(param_name):
             # don't load these buffers (more like a bug)
@@ -83,6 +88,10 @@ class NMTModel(nn.Module):
                 if self.encoder is not None and self.encoder.time == 'positional_encoding':
                     return False
             if param_name == 'decoder.mask':
+                return False
+            if param_name == 'decoder.r_w_bias' or param_name == 'decoder.r_r_bias':
+                if param_name in model_dict:
+                    return True
                 return False
             
             return True
@@ -94,11 +103,19 @@ class NMTModel(nn.Module):
         # only load the filtered parameters
         filtered = {k: v for k, v in state_dict.items() if condition(k)}
 
-        model_dict = self.state_dict()
-
         for k, v in model_dict.items():
             if k not in filtered:
                 filtered[k] = v
+
+        # for backward compatibility: only load parameters that exist in the model
+        # there is a bug in the ctc model that created 2 softmax output layer and 1 was not used
+        del_list = list()
+        for k,v in filtered.items():
+            if k not in model_dict:
+                del_list.append(k)
+
+        for k in del_list:
+            filtered.pop(k, None)
 
         super().load_state_dict(filtered)   
 

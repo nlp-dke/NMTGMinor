@@ -2,9 +2,14 @@ import torch
 from kaldiio import load_mat
 from functools import lru_cache
 import numpy as np
+from .audio_utils import _parse_arkpath, ArkLoader
 
 
 class SCPIndexDataset(torch.utils.data.Dataset):
+    """
+    This dataset simply stores a list of paths to ark matrices
+    The __get__ function uses load_mat from kaldiio to read the ark matrices for retrieval
+    """
 
     def __init__(self, scp_path_list, concat=4):
         """
@@ -14,6 +19,7 @@ class SCPIndexDataset(torch.utils.data.Dataset):
         self._sizes = len(self.scp_path_list)
         self._dtype = torch.float32
         self.concat = concat
+        self.reader = ArkLoader()
 
     @property
     def dtype(self):
@@ -30,10 +36,11 @@ class SCPIndexDataset(torch.utils.data.Dataset):
     @lru_cache(maxsize=8)
     def __getitem__(self, i):
         scp_path = self.scp_path_list[i]
-        mat = load_mat(scp_path)
+        mat = self.reader.load_mat(scp_path)
 
         feature_vector = torch.from_numpy(mat)
         concat = self.concat
+
         if concat > 1:
             add = (concat - feature_vector.size()[0] % concat) % concat
             z = torch.FloatTensor(add, feature_vector.size()[1]).zero_()

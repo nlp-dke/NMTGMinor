@@ -43,8 +43,10 @@ class EncdecMultiheadAttn(nn.Module):
         try:
             # the fast one requires apex and does not work with incremental so careful
             from apex.contrib.multihead_attn.fast_encdec_multihead_attn_func import fast_encdec_attn_func
+            from .encdec_attention_func import fast_encdec_attn_func
+
             self.attn_func_fast = fast_encdec_attn_func
-            self.optimized = 2
+            self.optimized = 1
 
         except ModuleNotFoundError as e:
             # print(e)
@@ -52,7 +54,7 @@ class EncdecMultiheadAttn(nn.Module):
             self.optimized = 2
             self.attn_func_fast = None
 
-    def reset_parameters(self):
+    def reset_parameters(self, init='normal'):
         # nn.init.xavier_uniform_(self.in_proj_weight_q)
         # in_proj_weight_kv has shape [2 * hidden, hidden] but it should be
         # initialized like a [hidden, hidden] matrix.
@@ -60,10 +62,16 @@ class EncdecMultiheadAttn(nn.Module):
         # therefore xavier_uniform gain should be set to sqrt(1.5).
         # nn.init.xavier_uniform_(self.in_proj_weight_kv, gain=math.sqrt(1.5))
         # nn.init.xavier_uniform_(self.out_proj_weight)
-        std_ = math.sqrt(2.0 / (self.embed_dim + self.embed_dim))
-        nn.init.normal_(self.in_proj_weight_q, 0.0, std_)
-        nn.init.normal_(self.in_proj_weight_kv, 0.0, std_)
-        nn.init.normal_(self.out_proj_weight, 0.0, std_)
+        if init == 'normal':  # xavier normal
+            std_ = math.sqrt(2.0 / (self.embed_dim + self.embed_dim))
+            nn.init.normal_(self.in_proj_weight_q, 0.0, std_)
+            nn.init.normal_(self.in_proj_weight_kv, 0.0, std_)
+            nn.init.normal_(self.out_proj_weight, 0.0, std_)
+        else:  # xavier uniform
+            std_ = math.sqrt(6.0 / (self.embed_dim + self.embed_dim))
+            nn.init.uniform_(self.in_proj_weight_q, -std_, std_)
+            nn.init.uniform_(self.in_proj_weight_kv, -std_, std_)
+            nn.init.uniform_(self.out_proj_weight, -std_, std_)
 
     def forward(self, query, key, value, attn_mask=None, incremental=False, incremental_cache=None):
 
@@ -80,7 +88,8 @@ class EncdecMultiheadAttn(nn.Module):
                 attn_mask = attn_mask.byte()
 
             outputs = self.attn_func_fast(time_masking, is_training, self.num_heads, query, key,
-                                          self.in_proj_weight_q, self.in_proj_weight_kv, self.out_proj_weight,
+                                          self.in_proj_weight_q, self.in_proj_weight_kv,
+                                          self.out_proj_weight,
                                           attn_mask, self.dropout)
 
             coverage = None

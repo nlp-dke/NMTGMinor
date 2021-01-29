@@ -14,6 +14,7 @@ import onmt
 import onmt.markdown
 import onmt.modules
 from onmt.data.data_iterator import DataIterator
+from onmt.data.multidata_iterator import MultiDataIterator
 from onmt.data.dataset import rewrap
 from onmt.model_factory import build_model, build_language_model, optimize_model
 from onmt.model_factory import init_model_parameters
@@ -26,6 +27,21 @@ def varname(p):
         m = re.search(r'\bvarname\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', line)
         if m:
             return m.group(1)
+
+
+def generate_data_iterator(dataset, seed, num_workers=1, epoch=1., buffer_size=0):
+
+    # check if dataset is a list:
+    if isinstance(dataset, list):
+        # this is a multidataset
+        data_iterator = MultiDataIterator(dataset, seed=seed, num_workers=num_workers,
+                                          epoch=epoch, buffer_size=buffer_size)
+    else:
+
+        data_iterator = DataIterator(dataset, dataset.collater, dataset.batches, seed=seed,
+                                     num_workers=num_workers, epoch=epoch, buffer_size=buffer_size)
+
+    return data_iterator
 
 
 class BaseTrainer(object):
@@ -42,17 +58,6 @@ class BaseTrainer(object):
 
         self.loss_function = loss_function
         self.start_time = 0
-
-        self.additional_data = []
-        self.additional_data_ratio = []
-
-    def add_additional_data(self, d, ratio):
-        self.additional_data = d
-        if ratio == "-1":
-            self.additional_data_ratio = [1] * (len(self.additional_data + 1))
-        else:
-            self.additional_data_ratio = [int(s) for s in ratio.split(";")]
-            assert (len(self.additional_data_ratio) == len(self.additional_data) + 1)
 
     def run(self, *args, **kwargs):
 
@@ -96,7 +101,7 @@ class BaseTrainer(object):
         pretrained_lang_emb = pretrained_model.decoder.language_embeddings
         pretrained_model.decoder.language_embeddings = None
 
-        # actually we assume that two decoders have the same language embeddings... 
+        # actually we assume that two decoders have the same language embeddings...
         untrained_word_emb = self.model.decoder.word_lut
         self.model.decoder.word_lut = None
         untrained_lang_emb = self.model.decoder.language_embeddings
@@ -170,7 +175,8 @@ class BaseTrainer(object):
             from pytorch_memlab import MemReporter
             reporter = MemReporter()
 
-        batch = self.train_data.get_largest_batch()
+        batch = self.train_data[0].get_largest_batch() if isinstance(self.train_data, list) \
+            else self.train_data.get_largest_batch()
         opt = self.opt
 
         if self.cuda:
@@ -191,16 +197,22 @@ class BaseTrainer(object):
 
         try:
             targets = batch.get('target_output')
-            tgt_mask = targets.data.ne(onmt.constants.PAD)
+            tgt_mask = None
             outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
                                  zero_encoder=opt.zero_encoder,
-                                 mirror=opt.mirror_loss, streaming_state=streaming_state)
+                                 mirror=opt.mirror_loss, streaming_state=streaming_state,
+                                 nce=opt.nce)
 
             outputs['tgt_mask'] = tgt_mask
 
-            loss_dict = self.loss_function(outputs, targets, model=self.model)
+            loss_dict = self.loss_function(outputs, targets, model=self.model, vocab_mask=batch.vocab_mask)
             loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
             full_loss = loss
+
+            if opt.ctc_loss > 0.0:
+                ctc_loss = self.ctc_loss_function(outputs, targets)
+                ctc_loss_data = ctc_loss.item()
+                full_loss = full_loss + opt.ctc_loss * ctc_loss
 
             if opt.mirror_loss:
                 rev_loss = loss_dict['rev_loss']
@@ -247,11 +259,16 @@ class BaseTrainer(object):
                 with amp.scale_loss(full_loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
             else:
-                loss.backward()
+                loss.div_(batch.tgt_size).backward()
 
             if self.opt.memory_profiling:
                 print('========= after backward =========')
                 reporter.report(verbose=True)
+
+            self.model.zero_grad()
+            self.optim.zero_grad()
+            # self.optim.step()
+            # self.optim.reset()
 
         except RuntimeError as e:
             if 'out of memory' in str(e):
@@ -260,7 +277,7 @@ class BaseTrainer(object):
                 raise e
 
         if oom:
-            print("* Warning: out-of-memory in warming up. This is due to the largest batch is too big for the GPU")
+            print("* Warning: out-of-memory in warming up. This is due to the largest batch is too big for the GPU.")
         else:
             print("* Warming up successuflly.")
 
@@ -280,12 +297,20 @@ class XETrainer(BaseTrainer):
             lid_loss = CrossEntropyLIDLoss(opt.n_languages, opt.label_smoothing, opt.fast_xentropy)
             self.loss_function.add_loss_function(lid_loss, 'lid_loss')
 
+        self.n_gpus = len(self.opt.gpus)
+
+        if opt.ctc_loss != 0:
+            from onmt.speech.ctc_loss import CTC
+            self.ctc_loss_function = CTC(0.0, reduce=True)
+
         if self.cuda:
             torch.cuda.set_device(self.opt.gpus[0])
             if self.opt.seed >= 0:
                 torch.manual_seed(self.opt.seed)
             self.loss_function = self.loss_function.cuda()
             self.model = self.model.cuda()
+            if opt.ctc_loss > 0.0:
+                self.ctc_loss_function = self.ctc_loss_function.cuda()
 
         if setup_optimizer:
 
@@ -339,8 +364,6 @@ class XETrainer(BaseTrainer):
             'epoch': epoch,
             'itr': itr_state_dict,
             'optim': optim_state_dict,
-            'additional_batch_order': getattr(self, 'additional_batch_order', None),
-            'additional_data_iteration': getattr(self, 'additional_data_iteration', None),
             'amp': amp.state_dict()
         }
 
@@ -360,13 +383,14 @@ class XETrainer(BaseTrainer):
         total_words = 0
         opt = self.opt
 
-        data_iterator = DataIterator(data, data.collater, data.batches, seed=self.opt.seed,
-                                     num_workers=opt.num_workers, epoch=1, buffer_size=opt.buffer_size)
-        epoch_iterator = data_iterator.next_epoch_itr(False, pin_memory=False)
-
         self.model.eval()
         self.loss_function.eval()
         self.model.reset_states()
+
+        # the data iterator creates an epoch iterator
+        data_iterator = generate_data_iterator(data, seed=self.opt.seed,
+                                               num_workers=opt.num_workers, epoch=1, buffer_size=opt.buffer_size)
+        epoch_iterator = data_iterator.next_epoch_itr(False, pin_memory=False)
 
         if opt.streaming:
             streaming_state = self.model.init_stream()
@@ -383,7 +407,8 @@ class XETrainer(BaseTrainer):
             while not data_iterator.end_of_epoch():
                 # batch = data.next()[0]
                 batch = next(epoch_iterator)
-
+                if isinstance(batch, list):
+                    batch = batch[0]
                 batch = rewrap(batch)
 
                 if self.cuda:
@@ -396,14 +421,15 @@ class XETrainer(BaseTrainer):
                 targets = batch.get('target_output')
                 tgt_mask = targets.ne(onmt.constants.PAD)
                 outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
-                                     mirror=opt.mirror_loss, streaming_state=streaming_state)
+                                     mirror=opt.mirror_loss, streaming_state=streaming_state, nce=opt.nce)
 
                 if opt.streaming:
                     streaming_state = outputs['streaming_state']
 
                 outputs['tgt_mask'] = tgt_mask
 
-                loss_dict = self.loss_function(outputs, targets, model=self.model, eval=True)
+                loss_dict = self.loss_function(outputs, targets, model=self.model, eval=True,
+                                               vocab_mask=batch.vocab_mask)
 
                 loss_data = loss_dict['data']
 
@@ -430,8 +456,12 @@ class XETrainer(BaseTrainer):
         self.model.reset_states()
 
         dataset = train_data
-        data_iterator = DataIterator(dataset, dataset.collater, dataset.batches, seed=self.opt.seed,
-                                     num_workers=opt.num_workers, epoch=epoch, buffer_size=opt.buffer_size)
+
+        # data iterator: object that controls the
+        # data_iterator = DataIterator(dataset, dataset.collater, dataset.batches, seed=self.opt.seed,
+        #                              num_workers=opt.num_workers, epoch=epoch, buffer_size=opt.buffer_size)
+        data_iterator = generate_data_iterator(dataset, seed=self.opt.seed, num_workers=opt.num_workers,
+                                               epoch=epoch, buffer_size=opt.buffer_size)
 
         if resume:
             data_iterator.load_state_dict(itr_progress)
@@ -442,6 +472,7 @@ class XETrainer(BaseTrainer):
         total_non_pads = 0
         report_loss, report_tgt_words = 0, 0
         report_src_words = 0
+        report_ctc_loss = 0
         report_rec_loss, report_rev_loss, report_mirror_loss = 0, 0, 0
         start = time.time()
         n_samples = len(epoch_iterator)
@@ -449,6 +480,7 @@ class XETrainer(BaseTrainer):
         counter = 0
         num_accumulated_words = 0
         num_accumulated_sents = 0
+        grad_scaler = 1
 
         nan = False
         nan_counter = 0
@@ -458,27 +490,17 @@ class XETrainer(BaseTrainer):
         else:
             streaming_state = None
 
-        i = data_iterator.iterations_in_epoch
+        i = data_iterator.iterations_in_epoch if not isinstance(train_data, list) else epoch_iterator.n_yielded
+
         while not data_iterator.end_of_epoch():
 
             curriculum = (epoch < opt.curriculum)
 
-            # if (len(self.additional_data) > 0 and
-            #         i % self.additional_data_ratio[0] == 0):
-            #     for j in range(len(self.additional_data)):
-            #         for k in range(self.additional_data_ratio[j + 1]):
-            #             if self.additional_data_iteration[j] == len(self.additional_data[j]):
-            #                 self.additional_data_iteration[j] = 0
-            #                 self.additional_data[j].shuffle()
-            #                 self.additional_batch_order[j] = self.additional_data[j].create_order()
-            #
-            #             batches.append(self.additional_data[j].next()[0])
-            #             self.additional_data_iteration[j] += 1
-
-            # for b in range(len(batches)):
+            # this batch generator is not very clean atm
             batch = next(epoch_iterator)
+            if isinstance(batch, list) and self.n_gpus == 1:
+                batch = batch[0]
             batch = rewrap(batch)
-            grad_scaler = self.opt.batch_size_words if self.opt.update_frequency > 1 else batch.tgt_size
 
             if self.cuda:
                 batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
@@ -494,19 +516,26 @@ class XETrainer(BaseTrainer):
                 # outputs is a dictionary containing keys/values necessary for loss function
                 # can be flexibly controlled within models for easier extensibility
                 targets = batch.get('target_output')
-                tgt_mask = targets.data.ne(onmt.constants.PAD)
+                tgt_mask = targets.ne(onmt.constants.PAD)
                 outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
                                      zero_encoder=opt.zero_encoder,
-                                     mirror=opt.mirror_loss, streaming_state=streaming_state)
+                                     mirror=opt.mirror_loss, streaming_state=streaming_state,
+                                     nce=opt.nce)
 
                 batch_size = batch.size
 
                 outputs['tgt_mask'] = tgt_mask
 
-                loss_dict = self.loss_function(outputs, targets, model=self.model)
+                loss_dict = self.loss_function(outputs, targets, model=self.model, vocab_mask=batch.vocab_mask)
                 loss_data = loss_dict['data']
                 loss = loss_dict['loss']  # a little trick to avoid gradient overflow with fp16
                 full_loss = loss
+
+                if opt.ctc_loss > 0.0:
+                    ctc_loss = self.ctc_loss_function(outputs, targets)
+                    ctc_loss_data = ctc_loss.item()
+                    full_loss = full_loss + opt.ctc_loss * ctc_loss
+                    report_ctc_loss += ctc_loss_data
 
                 if opt.mirror_loss:
                     rev_loss = loss_dict['rev_loss']
@@ -515,7 +544,6 @@ class XETrainer(BaseTrainer):
                     full_loss = full_loss + rev_loss + mirror_loss
                     mirror_loss_data = loss_dict['mirror_loss'].item()
                 else:
-                    rev_loss = None
                     rev_loss_data = None
                     mirror_loss_data = 0
 
@@ -527,13 +555,13 @@ class XETrainer(BaseTrainer):
                     rec_loss_data = loss_dict['rec_loss_data']
                 else:
                     rec_loss_data = None
-
-                if opt.lfv_multilingual:
-                    lid_logits = outputs['lid_logits']
-                    lid_labels = batch.get('target_lang')
-                    lid_loss_function = self.loss_function.get_loss_function('lid_loss')
-                    lid_loss = lid_loss_function(lid_logits, lid_labels)
-                    full_loss = full_loss + lid_loss
+                #
+                # if opt.lfv_multilingual:
+                #     lid_logits = outputs['lid_logits']
+                #     lid_labels = batch.get('target_lang')
+                #     lid_loss_function = self.loss_function.get_loss_function('lid_loss')
+                #     lid_loss = lid_loss_function(lid_logits, lid_labels)
+                #     full_loss = full_loss + lid_loss
 
                 optimizer = self.optim.optimizer
 
@@ -546,6 +574,8 @@ class XETrainer(BaseTrainer):
                         scaled_loss.backward()
                 else:
                     full_loss.backward()
+
+                del outputs
 
             except RuntimeError as e:
                 if 'out of memory' in str(e):
@@ -570,6 +600,7 @@ class XETrainer(BaseTrainer):
                 if nan_counter >= 15:
                     raise ValueError("Training stopped because of multiple NaN occurence. "
                                      "For ASR, using the Relative Transformer is more stable and recommended.")
+                counter = 0
             else:
                 nan_counter = 0
 
@@ -592,12 +623,9 @@ class XETrainer(BaseTrainer):
 
                 if update_flag:
                     # accumulated gradient case, in this case the update frequency
-                    if (counter == 1 and self.opt.update_frequency != 1) or counter > 1:
-                        grad_denom = 1 / grad_scaler
-                        if self.opt.normalize_gradient:
-                            grad_denom = num_accumulated_words * grad_denom
-                    else:
-                        grad_denom = 1
+                    grad_denom = 1 / grad_scaler
+                    if self.opt.normalize_gradient:
+                        grad_denom = num_accumulated_words * grad_denom
                     # When we accumulate the gradients, each gradient is already normalized by a constant grad_scaler
                     normalize_gradients(amp.master_params(optimizer), grad_denom)
                     # Update the parameters.
@@ -660,6 +688,10 @@ class XETrainer(BaseTrainer):
                                    (report_src_words / (time.time() - start),
                                     report_tgt_words / (time.time() - start)))
 
+                    if opt.ctc_loss > 0.0:
+                        ctc_loss = report_ctc_loss / report_tgt_words
+                        log_string += (" ctcloss: %8.2f ; " % ctc_loss)
+
                     log_string += ("%s elapsed" %
                                    str(datetime.timedelta(seconds=int(time.time() - self.start_time))))
 
@@ -668,6 +700,7 @@ class XETrainer(BaseTrainer):
                     report_loss = 0
                     report_tgt_words, report_src_words = 0, 0
                     report_rec_loss, report_rev_loss, report_mirror_loss = 0, 0, 0
+                    report_ctc_loss = 0
                     start = time.time()
 
                 i = i + 1
@@ -686,6 +719,7 @@ class XETrainer(BaseTrainer):
             prec_opt = checkpoint['opt'] if 'opt' in checkpoint else None
 
             if not opt.reset_optim:
+                print("* Loading optimizer states ... ")
                 self.optim.load_state_dict(checkpoint['optim'])
                 if prec_opt is not None and hasattr(prec_opt, "fp16_mixed"):
                     # Only load amp information if the mode is the same
@@ -699,19 +733,15 @@ class XETrainer(BaseTrainer):
                     itr_progress = checkpoint['itr']
                 else:
                     itr_progress = None
-                opt.start_epoch = int(math.floor(float(checkpoint['epoch'] + 1)))
 
                 resume = True
-                if len(self.additional_data) > 0:
-                    if 'additional_batch_order' in checkpoint:
-                        self.additional_batch_order = checkpoint['additional_batch_order']
-                        self.additional_data_iteration = checkpoint['additional_data_iteration']
-                    else:
-                        self.init_additional_data()
+                start_epoch = checkpoint['epoch'] if 'epoch' in checkpoint else 1
+                if start_epoch is None:
+                    start_epoch = 1
             else:
                 itr_progress = None
                 resume = False
-                self.init_additional_data()
+                start_epoch = 1
 
             del checkpoint['model']
             del checkpoint['optim']
@@ -721,7 +751,7 @@ class XETrainer(BaseTrainer):
             print('Initializing model parameters')
             init_model_parameters(model, opt)
             resume = False
-            self.init_additional_data()
+            start_epoch = 1
 
         if opt.load_encoder_from:
             self.load_encoder_weight(opt.load_encoder_from)
@@ -733,13 +763,19 @@ class XETrainer(BaseTrainer):
         if self.cuda:
             self.warm_up()
 
-        valid_loss = self.eval(self.valid_data)
-        valid_ppl = math.exp(min(valid_loss, 100))
-        print('Validation perplexity: %g' % valid_ppl)
+            valid_loss = self.eval(self.valid_data)
+            valid_ppl = math.exp(min(valid_loss, 100))
+            print('Validation perplexity: %g' % valid_ppl)
 
         self.start_time = time.time()
 
-        for epoch in range(opt.start_epoch, opt.start_epoch + opt.epochs):
+        if opt.starting_step > 0:
+            self.optim.override_starting_step(opt.starting_step)
+
+        if opt.override_ctc_loss >= 0:
+            opt.ctc_loss = opt.override_ctc_loss
+
+        for epoch in range(start_epoch, start_epoch + opt.epochs):
             print('')
 
             #  (1) train for one epoch on the training set
@@ -756,10 +792,4 @@ class XETrainer(BaseTrainer):
             itr_progress = None
             resume = False
 
-    def init_additional_data(self):
-        self.additional_batch_order = []
-        self.additional_data_iteration = []
-        for i in range(len(self.additional_data)):
-            self.additional_data_iteration.append(0)
-            self.additional_data[i].shuffle()
-            self.additional_batch_order.append(self.additional_data[i].create_order())
+

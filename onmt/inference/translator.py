@@ -153,6 +153,13 @@ class Translator(object):
     # Combine distributions from different models
     def _combine_outputs(self, outputs):
 
+        sizes = [output_.size(-1) for output_ in outputs.values()]
+        min_size = min(sizes)
+
+        for key in outputs:
+            outputs[key] = outputs[key][:, :min_size]
+        # outputs = resized_outputs
+
         if len(outputs) == 1:
             return outputs[0]
 
@@ -280,6 +287,8 @@ class Translator(object):
 
     def translate_batch(self, batch):
 
+        if isinstance(batch, list):
+            batch = batch[0]
         torch.set_grad_enabled(False)
         # Batch size is in different location depending on data.
 
@@ -329,7 +338,6 @@ class Translator(object):
 
             for k in range(self.n_models):
                 # decoder_hidden, coverage = self.models[k].decoder.step(decoder_input.clone(), decoder_states[k])
-
                 # run decoding on the model
                 decoder_output = self.models[k].step(decoder_input.clone(), decoder_states[k])
 
@@ -340,7 +348,7 @@ class Translator(object):
             # for ensembling models
             out = self._combine_outputs(outs)
             attn = self._combine_attention(attns)
-
+            # print(attn.shape)
             # for lm fusion
             if self.opt.lm:
                 lm_decoder_output = self.lm_model.step(decoder_input.clone(), lm_decoder_states)
@@ -352,7 +360,8 @@ class Translator(object):
                 out = lm_out
             word_lk = out.view(beam_size, remaining_sents, -1) \
                 .transpose(0, 1).contiguous()
-            attn = attn.view(beam_size, remaining_sents, -1) \
+
+            attn = attn.contiguous().view(beam_size, remaining_sents, -1) \
                 .transpose(0, 1).contiguous()
 
             active = []
@@ -364,7 +373,6 @@ class Translator(object):
                 idx = batch_idx[b]
                 if not beam[b].advance(word_lk.data[idx], attn.data[idx]):
                     active += [b]
-
                 for j in range(self.n_models):
                     decoder_states[j].update_beam(beam, b, remaining_sents, idx)
 
@@ -406,7 +414,10 @@ class Translator(object):
             else:
                 valid_attn = decoder_states[0].original_src[:, b].ne(onmt.constants.PAD) \
                     .nonzero().squeeze(1)
-            attn = [a.index_select(1, valid_attn) for a in attn]
+            # print(valid_attn)
+            # for a in attn:
+            #     print(a.shape)
+            attn = [a for a in attn]
             all_attn += [attn]
 
             if self.beam_accum:
@@ -425,18 +436,29 @@ class Translator(object):
 
         return all_hyp, all_scores, all_attn, all_lengths, gold_scores, gold_words, allgold_scores
 
-    def translate(self, src_data, tgt_data):
-        #  (1) convert words to indexes
-        dataset = self.build_data(src_data, tgt_data)
-        batch = dataset.get_batch(0)  # this dataset has only one mini-batch
+    def translate(self, src_data, tgt_data, type="mt"):
+        if isinstance(src_data[0], list) and type == 'asr':
+            batches = list()
+            for src_data_ in src_data:
+                dataset = self.build_data(src_data_, tgt_data, type=type)
+                batch = dataset.get_batch(0)
+                batches.append(batch)
+        else:
+            dataset = self.build_data(src_data, tgt_data, type=type)
+            batch = dataset.get_batch(0)  # this dataset has only one mini-batch
+            batches = [batch] * self.n_models
+            src_data = [src_data] * self.n_models
+
         if self.cuda:
-            batch.cuda(fp16=self.fp16)
-        batch_size = batch.size
+            for i, _ in enumerate(batches):
+                batches[i].cuda(fp16=self.fp16)
+        batch_size = batches[0].size
 
         #  (2) translate
-        pred, pred_score, attn, pred_length, gold_score, gold_words, allgold_words = self.translate_batch(batch)
+        pred, pred_score, attn, pred_length, gold_score, gold_words, allgold_words = self.translate_batch(batches)
 
         #  (3) convert indexes to words
+        src_data = src_data[0]
         pred_batch = []
         for b in range(batch_size):
             pred_batch.append(
@@ -467,5 +489,4 @@ class Translator(object):
             )
 
         return pred_batch, pred_score, pred_length, gold_score, gold_words, allgold_words
-
 
