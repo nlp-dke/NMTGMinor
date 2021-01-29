@@ -1,23 +1,15 @@
-# Transformer networks for Neural Machine Translation
+# NMTGMinor
+This repo is a sequence-to-sequence toolkit based on [NMTGMinor](https://github.com/quanpn90/NMTGMinor).
 
-This is an implementation of the transformer for the paper
-
-["Attention is all you need"](https://papers.nips.cc/paper/7181-attention-is-all-you-need.pdf)
-
-It also contains the implementation of the Speech Transformer as in
-
-["Very Deep Self-Attention Networks for End-to-End Speech Recognition"](https://arxiv.org/abs/1904.13377)
+It supports machine translation, speech recognition/translation.
 
 ----------------------------
-Requirement: (mostly recommended to use with Anaconda3 - Python3.7)
-
-PyTorch (1.0.1 or 1.1). The code base is normally kept up-to-date with the latest version of PyTorch. 
-
-hdf5 
-
-apex (the C++ and CUDA extensions are not required) https://github.com/nvidia/apex
-
-Recipe for the Speech model coming soon.
+## Requirement 
+* Python version >= 3.7 (most recommended)
+* [PyTorch](https://pytorch.org/) >= 1.0.1
+* [apex](https://github.com/nvidia/apex) when using half- or mixed-precision training
 
 ----------------------------
 
+## Credits
+Please see the original [NMTGMinor](https://github.com/quanpn90/NMTGMinor) repo for its main authors.
