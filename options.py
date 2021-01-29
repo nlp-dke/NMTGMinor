@@ -7,6 +7,10 @@ def make_parser(parser):
                         help='Path to the *-train.pt file from preprocess.py')
     parser.add_argument('-data_format', required=False, default='raw',
                         help='Default data format: raw')
+
+    parser.add_argument('-multi_dataset', action='store_true',
+                        help='Reading multiple datasets (sharing the same dictionary)')
+
     parser.add_argument('-additional_data', required=False, default='none',
                         help='Path to the *-train.pt file from preprocess.py for addtional data; sepeated by semi-colon')
     parser.add_argument('-additional_data_format', required=False, default='bin',
@@ -250,6 +254,8 @@ def make_parser(parser):
                         help='Whether to use adversarial classifer')
     parser.add_argument('-adversarial_classifier_start_from', type=int, default=9999,
                         help='From which epoch will the adversarial classifier start')
+    parser.add_argument('-aux_loss_start_from', type=int, default=9999,
+                        help='From which epoch will the auxiliary loss start to kick in')
 
     parser.add_argument('-change_residual_at', type=int, default=None,
                         help='Where to remove residual connections in encoder layer output. '
@@ -267,10 +273,16 @@ def make_parser(parser):
                         help="""Use multiway source sentences""")
     parser.add_argument('-multiway_src_valid', action='store_true',
                         help="""Use multiway source sentences in dev set""")
+    parser.add_argument('-language_specific_encoder', default=[], nargs='+', type=int,
+                        help="Where to add language-specific adapters."
+                             "1 (all layers)")
 
+    parser.add_argument('-bidirectional_translation', action='store_true',
+                        help="Whether to translate src -> tgt, tgt -> src simultaneously, given src -> tgt data")
     parser.add_argument('-sim_loss_type', type=int, default=None,
-                        help='Type of aux. loss to encourage language similarity. 1st digit: 1(by position)|2(mean)|3(max),'
-                             '2nd digit: 1(squared error)|...(abs error)')
+                        help='Type of auxilliary loss to encourage language similarity.'
+                             '1st digit: 1 (meanpool over time) | 2 (by position) | 3 (maxpool over time) | 4 (maxpool over feature),'
+                             '2nd digit: 1 (squared error)...')
     parser.add_argument('-aux_loss_weight', type=float, default=0.0,
                         help='Weight for the auxiliary loss')
 
@@ -473,6 +485,12 @@ def backward_compatible(opt):
     if not hasattr(opt, 'adversarial_classifier_start_from'):
         opt.adversarial_classifier_start_from = 9999
 
+    if not hasattr(opt, 'aux_loss_start_from'):
+        opt.aux_loss_start_from = 9999
+
+    if not hasattr(opt, 'bidirectional_translation'):
+        opt.bidirectional_translation = False
+
     if not hasattr(opt, 'buffer_size'):
         opt.buffer_size = 16
 
@@ -481,5 +499,8 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'nce'):
         opt.nce = 0
+
+    if not hasattr(opt, 'language_specific_encoder'):
+        opt.language_specific_encoder = []
 
     return opt

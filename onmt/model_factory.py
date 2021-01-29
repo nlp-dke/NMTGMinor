@@ -47,6 +47,7 @@ def build_tm_model(opt, dicts):
         generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
                                                           fix_norm=opt.fix_norm_output_embedding)]
 
+    # build classifier
     if opt.language_classifier:
         mid_layer_size = opt.language_classifer_mid_layer_size
 
@@ -60,9 +61,6 @@ def build_tm_model(opt, dicts):
             elif opt.token_classifier == 2:
                 # predict positional ID
                 output_size = opt.max_position_length
-            elif opt.token_classifier == 3:
-                # predict POS tag
-                raise NotImplementedError
             else:
                 raise NotImplementedError
         else:
@@ -99,10 +97,11 @@ def build_tm_model(opt, dicts):
     if opt.use_language_embedding:
         print("* Create language embeddings with %d languages" % len(dicts['langs']))
         language_embeddings = nn.Embedding(len(dicts['langs']), opt.model_size)
+        opt.n_languages = len(dicts['langs'])
     else:
         language_embeddings = None
 
-    if opt.ctc_loss != 0:
+    if 0 < opt.ctc_loss < 1.0:  # TODO: was "!= 0:"
         generators.append(onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size() + 1))
 
     if opt.model in ['transformer', 'stochastic_transformer']:
@@ -124,7 +123,7 @@ def build_tm_model(opt, dicts):
 
         decoder = TransformerDecoder(opt, embedding_tgt, positional_encoder, language_embeddings=language_embeddings)
 
-        model = Transformer(encoder, decoder, nn.ModuleList(generators), mirror=opt.mirror_loss)
+        model = Transformer(encoder, decoder, nn.ModuleList(generators), mirror=opt.mirror_loss, ctc=opt.ctc_loss)
 
     elif opt.model == 'multi_source_target_transformer':
         print('*** Multi source-target encoder')
@@ -356,7 +355,7 @@ def build_fusion(opt, dicts):
     return model
 
 
-def optimize_model(model):
+def optimize_model(model, fp16=True, distributed=False):
     """
     Used to potentially upgrade the components with more optimized counterparts in the future
     """
@@ -372,7 +371,7 @@ def optimize_model(model):
 
         except ModuleNotFoundError:
             replacable = False
-        #
+
         # if replacable:
         #     for attr_str in dir(m):
         #         target_attr = getattr(m, attr_str)
@@ -383,4 +382,17 @@ def optimize_model(model):
         #     for n, ch in m.named_children():
         #         replace_layer_norm(ch, n)
 
+        def safe_batch_norm(m, name):
+            for attr_str in dir(m):
+                target_attr = getattr(m, attr_str)
+                if type(target_attr) == torch.nn.BatchNorm2d or type(target_attr) == torch.nn.BatchNorm1d:
+
+                    if fp16:
+                        target_attr.eps = 1e-5  # tiny value for fp16 according to AllenNLP
+
+                    setattr(m, attr_str, target_attr)
+
     replace_layer_norm(model, "Transformer")
+
+    # if fp16:
+    #     safe_batch_norm(model, "Transformer")

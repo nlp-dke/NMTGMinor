@@ -96,31 +96,54 @@ def collect_fn(src_data, tgt_data,
                src_align_right, tgt_align_right,
                src_type='text',
                augmenter=None, upsampling=False,
-               bilingual=False, token_level_lang=False, vocab_mask=None):
+               bilingual=False, token_level_lang=False, vocab_mask=None, bidirectional=False):
 
     tensors = dict()
     if src_data is not None:
-        tensors['source'], tensors['source_pos'], src_lengths = merge_data(src_data, align_right=src_align_right,
-                                                                           type=src_type, augmenter=augmenter,
-                                                                           upsampling=upsampling, feature_size=40)
+        source_full, source_pos, src_lengths = merge_data(src_data, align_right=src_align_right,
+                                                                               type=src_type, augmenter=augmenter,
+                                                                               upsampling=upsampling, feature_size=40)
+        source_full = source_full.transpose(0, 1).contiguous()  # B, T --> T, B
+
         tensors['src_type'] = src_type
-        tensors['source'] = tensors['source'].transpose(0, 1).contiguous()  # B, T --> T, B
-        if tensors['source_pos'] is not None:
-            tensors['source_pos'] = tensors['source_pos'].transpose(0, 1)
-        tensors['src_lengths'] = torch.LongTensor(src_lengths)
-        src_lengths = tensors['src_lengths']
-        tensors['src_size'] = sum(src_lengths)
+
+        if not bidirectional:  # as normal
+            tensors['source'] = source_full
+            if source_pos is not None:
+                tensors['source_pos'] = source_pos.transpose(0, 1)
+            tensors['src_lengths'] = torch.LongTensor(src_lengths)
+            src_lengths = tensors['src_lengths']
+            tensors['src_size'] = sum(src_lengths)
+            # tensors['src_lengths'] = src_lengths
+
+        else:   # source sentences have BOS and EOS appended
+            tensors['source'] = source_full[1:-1]   # strip BOS and EOS to form input
+            tensors['source_input'] = source_full[:-1]
+            tensors['source_output'] = source_full[1:]
+
+            if source_pos is not None:
+                tensors['source_pos'] = source_pos.t().contiguous()[:-1]
+
+            tensors['src_size'] = sum([len(x) - 2 for x in src_data])
+            tensors['src_lengths'] = torch.LongTensor([i - 2 for i in src_lengths])  # -2 cuz BOS and EOS
+            src_lengths = tensors['src_lengths']
 
     if tgt_data is not None:
         target_full, target_pos, tgt_lengths = merge_data(tgt_data, align_right=tgt_align_right)
         target_full = target_full.t().contiguous()  # transpose BxT to TxB
+
         tensors['target'] = target_full
+
+        if bidirectional:   # strip BOS and EOS to form input
+            tensors['target_as_source'] = target_full[1:-1]
+
         tensors['target_input'] = target_full[:-1]
         tensors['target_output'] = target_full[1:]
         if target_pos is not None:
             tensors['target_pos'] = target_pos.t().contiguous()[:-1]
         tgt_size = sum([len(x) - 1 for x in tgt_data])
-        tensors['tgt_lengths'] = tgt_lengths
+        tensors['tgt_lengths'] = torch.LongTensor([i - 2 for i in tgt_lengths])
+        tgt_lengths = tensors['tgt_lengths']
     else:
         tgt_size = 0
         tensors['tgt_lengths'] = None
@@ -140,8 +163,20 @@ def collect_fn(src_data, tgt_data,
                 out_tensor[:(src_lengths[i]), i] = v + 1
 
             tensors['targets_source_lang'] = out_tensor
+
     if tgt_lang_data is not None:
         tensors['target_lang'] = torch.cat(tgt_lang_data).long()
+
+        if token_level_lang and bidirectional:  # prepare token-level language prediction targets
+            sl_ = tensors['target_lang']  # sl_.shape[0]
+            # out_dims = (max(tensors['tgt_lengths']).item(), sl_.shape[0])  # T, B
+            out_dims = (max(tgt_lengths), sl_.shape[0])
+            out_tensor = sl_.data.new(*out_dims).fill_(onmt.constants.PAD)
+            for i, v in enumerate(sl_):
+                # lan ID starts with 0, but pred label values should start with 1 (due to padding)
+                out_tensor[:(src_lengths[i]), i] = v + 1
+
+            tensors['targets_target_lang'] = out_tensor
 
     tensors['vocab_mask'] = vocab_mask
 
@@ -402,6 +437,7 @@ class Dataset(torch.utils.data.Dataset):
                  verbose=False, cleaning=False, debug=False,
                  num_split=1,
                  token_level_lang=False,
+                 bidirectional=False,
                  **kwargs):
         """
         :param src_data: List of tensors for the source side (1D for text, 2 or 3Ds for other modalities)
@@ -631,6 +667,7 @@ class Dataset(torch.utils.data.Dataset):
         #     self.augmenter = None
 
         self.token_level_lang = token_level_lang
+        self.bidirectional_translation = bidirectional
 
     def size(self):
 
@@ -817,7 +854,8 @@ class Dataset(torch.utils.data.Dataset):
                                   src_align_right=self.src_align_right, tgt_align_right=self.tgt_align_right,
                                   src_type=self._type,
                                   augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask,
-                                  token_level_lang=self.token_level_lang)
+                                  token_level_lang=self.token_level_lang,
+                                  bidirectional=self.bidirectional_translation)
                        )
         return batch
 
@@ -861,7 +899,8 @@ class Dataset(torch.utils.data.Dataset):
                                src_align_right=self.src_align_right, tgt_align_right=self.tgt_align_right,
                                src_type=self._type,
                                augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask,
-                               token_level_lang=self.token_level_lang)
+                               token_level_lang=self.token_level_lang,
+                               bidirectional=self.bidirectional_translation)
 
             batches.append(batch)
 

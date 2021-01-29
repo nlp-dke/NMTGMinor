@@ -104,7 +104,8 @@ class EncoderLayer(nn.Module):
         out: batch_size x len_query x d_model
     """
     
-    def __init__(self, h, d_model, p, d_ff, attn_p=0.1, variational=False, death_rate=0.0, change_residual=None, change_att_query=None, opt=None, **kwargs):
+    def __init__(self, h, d_model, p, d_ff, attn_p=0.1, variational=False, death_rate=0.0,
+                 change_residual=None, change_att_query=None, add_adapter=False, opt=None, **kwargs):
         super(EncoderLayer, self).__init__()
         self.variational = variational
         self.death_rate = death_rate
@@ -121,12 +122,16 @@ class EncoderLayer(nn.Module):
 
         print('*** att_postpro_type', att_postpro_type, ', change_att_query', change_att_query)
 
+        if opt.language_specific_encoder:
+            # for language in
+            ff_dict = {}
+
         self.preprocess_attn = PrePostProcessing(d_model, p, sequence='n')
         self.postprocess_attn = PrePostProcessing(d_model, p, sequence=att_postpro_type, variational=self.variational)
         self.preprocess_ffn = PrePostProcessing(d_model, p, sequence='n')
         self.postprocess_ffn = PrePostProcessing(d_model, p, sequence='da', variational=self.variational)
         self.multihead = MultiHeadAttention(h, d_model, attn_p=attn_p, share=2)
-        
+
         if onmt.constants.activation_layer == 'linear_relu_linear':
             ff_p = p
             feedforward = FeedForward(d_model, d_ff, ff_p, variational=self.variational)
@@ -140,21 +145,19 @@ class EncoderLayer(nn.Module):
             raise NotImplementedError
         self.feedforward = Bottle(feedforward)
 
-        # if opt.freeze_encoder:
-        #     for p in self.parameters():
-        #         p.requires_grad = False
-        #     for p in self.preprocess_attn.parameters():
-        #         p.requires_grad = False
-        #     for p in self.postprocess_attn.parameters():
-        #         p.requires_grad = False
-        #     for p in self.preprocess_ffn.parameters():
-        #         p.requires_grad = False
-        #     for p in self.postprocess_ffn.parameters():
-        #         p.requires_grad = False
-
         self.change_att_query = change_att_query
+
+        self.add_adapter = add_adapter
+
+        if self.add_adapter:
+            adapter_bottleneck_size = opt.model_size // 2
+            from onmt.modules.multilingual_factorized.multilingual_adapters import MultilingualAdapter
+            self.adapters = MultilingualAdapter(model_size=opt.model_size, bottleneck_size=adapter_bottleneck_size,
+                                                n_languages=opt.n_languages,
+                                                dropout=opt.dropout, variational=self.variational)
             
-    def forward(self, input, attn_mask, given_query=None, att_plot_path=None):
+    def forward(self, input, attn_mask, given_query=None, att_plot_path=None,
+                src_lang=None, incremental=False, incremental_cache=None, mems=None):
 
         coin = True
         if self.training:
@@ -182,6 +185,9 @@ class EncoderLayer(nn.Module):
                 out = out / (1 - self.death_rate)
 
             input = self.postprocess_ffn(out, input)
+
+            if self.add_adapter:
+                input = self.adapters(input, src_lang)
         
         return input
     

@@ -235,8 +235,6 @@ class TransformerEncoder(nn.Module):
 
         if opt.freeze_encoder:
             self.requires_grad_(False)
-            # for p in self.parameters():
-            #     p.requires_grad = False
 
         self.language_classifier = opt.language_classifier
         self.language_classifier_sent = opt.language_classifier_sent
@@ -258,7 +256,7 @@ class TransformerEncoder(nn.Module):
                                    (self.change_residual_at == _l + 1) or \
                                    (self.change_residual_at == -1 and _l == self.layers - 1)
             if change_residual_here:
-                print('*** Layer', _l, 'change residual to code', self.change_residual)
+                print('*** Layer (indexing from 0)', _l, 'change residual to code', self.change_residual)
                 change_residual = self.change_residual
 
             change_att_query = None
@@ -266,16 +264,29 @@ class TransformerEncoder(nn.Module):
                                     (self.change_att_query_at == _l + 1) or \
                                     (self.change_att_query_at == -1 and _l == self.layers - 1)
             if change_att_query_here:
-                print('*** Layer', _l, 'change att query to code', self.change_att_query)
+                print('*** Layer (indexing from 0)', _l, 'change att query to code', self.change_att_query)
                 change_att_query = self.change_att_query
+
+            if opt.language_specific_encoder:
+                if opt.language_specific_encoder == 1:  # 1 used to mean all
+                    add_adapter = True
+                elif _l + 1 in opt.language_specific_encoder:
+                    add_adapter = True
+                else:
+                    add_adapter = False
+            else:
+                add_adapter = False
+
+            if add_adapter:
+                print('*** Layer (indexing from 0)', _l, '+ adapter')
 
             block = EncoderLayer(self.n_heads, self.model_size,
                                  self.dropout, self.inner_size, self.attn_dropout,
                                  variational=self.varitional_dropout, death_rate=death_r,
                                  change_residual=change_residual,
                                  change_att_query=change_att_query,
-                                 opt=opt
-                                 )
+                                 add_adapter=add_adapter,
+                                 opt=opt)
 
             self.layer_modules.append(block)
 
@@ -359,7 +370,8 @@ class TransformerEncoder(nn.Module):
         output_dict = {}
 
         for i, layer in enumerate(self.layer_modules):
-            context = layer(context, mask_src, given_query=given_query, att_plot_path=self.att_plot_path)   # batch_size x len_src x d_model
+            context = layer(context, mask_src, given_query=given_query, att_plot_path=self.att_plot_path,
+                            src_lang=input_lang)   # batch_size x len_src x d_model
 
             if self.save_activation is not None and (i == len(self.layer_modules) - 1):
                 padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
@@ -691,8 +703,8 @@ class TransformerDecoder(nn.Module):
 class Transformer(NMTModel):
     """Main model in 'Attention is all you need' """
 
-    def __init__(self, encoder, decoder, generator=None, mirror=False):
-        super().__init__(encoder, decoder, generator)
+    def __init__(self, encoder, decoder, generator=None, mirror=False, ctc=None):
+        super().__init__(encoder, decoder, generator, ctc)
         self.model_size = self.decoder.model_size
         self.switchout = self.decoder.switchout
         self.tgt_vocab_size = self.decoder.word_lut.weight.size(0)
@@ -712,7 +724,7 @@ class Transformer(NMTModel):
         return
 
     def forward(self, batch, target_mask=None, streaming=False, zero_encoder=False,
-                mirror=False, streaming_state=None):
+                mirror=False, streaming_state=None, reverse_src_tgt=False):
         """
         :param streaming_state:
         :param streaming:
@@ -725,14 +737,24 @@ class Transformer(NMTModel):
         if self.switchout > 0 and self.training:
             batch.switchout(self.switchout, self.src_vocab_size, self.tgt_vocab_size)
 
-        src = batch.get('source')
-        tgt = batch.get('target_input')
-        src_pos = batch.get('source_pos')
-        tgt_pos = batch.get('target_pos')
-        src_lang = batch.get('source_lang')
-        tgt_lang = batch.get('target_lang')
-        src_lengths = batch.src_lengths
-        tgt_lengths = batch.tgt_lengths
+        if not reverse_src_tgt:
+            src = batch.get('source')
+            tgt = batch.get('target_input')
+            src_pos = batch.get('source_pos')
+            tgt_pos = batch.get('target_pos')
+            src_lang = batch.get('source_lang')
+            tgt_lang = batch.get('target_lang')
+            src_lengths = batch.src_lengths
+            tgt_lengths = batch.tgt_lengths
+        else:   # use target as input, source as output (instead of using source as input, target as output)
+            src = batch.get('target_as_source')
+            tgt = batch.get('source_input')
+            src_pos = batch.get('target_pos')
+            tgt_pos = batch.get('source_pos')
+            src_lang = batch.get('target_lang')
+            tgt_lang = batch.get('source_lang')
+            src_lengths = batch.tgt_lengths
+            tgt_lengths = batch.src_lengths
 
         src = src.transpose(0, 1)  # transpose to have batch first
         tgt = tgt.transpose(0, 1)
@@ -750,25 +772,27 @@ class Transformer(NMTModel):
         if zero_encoder:
             context.zero_()
 
-        decoder_output = self.decoder(tgt, context, src, input_lang=tgt_lang, input_pos=tgt_pos, streaming=streaming,
+        if not self.ctc:    # if CTC is active, skip decoder (if any)
+            decoder_output = self.decoder(tgt, context, src, input_lang=tgt_lang, input_pos=tgt_pos, streaming=streaming,
                                       src_lengths=src_lengths, tgt_lengths=tgt_lengths, streaming_state=streaming_state)
 
-        # update the streaming state again
-        decoder_output = defaultdict(lambda : None, decoder_output)
-        streaming_state = decoder_output['streaming_state']
-        output = decoder_output['hidden']
+            # update the streaming state again
+            decoder_output = defaultdict(lambda: None, decoder_output)
+            streaming_state = decoder_output['streaming_state']
+            output = decoder_output['hidden']
 
         output_dict = defaultdict(lambda: None)
-        output_dict['hidden'] = output
+        output_dict['hidden'] = output if not self.ctc else None
         output_dict['context'] = context
         output_dict['src_mask'] = encoder_output['src_mask']
         output_dict['src'] = src
         output_dict['target_mask'] = target_mask
-        output_dict['streaming_state'] = streaming_state
+        output_dict['streaming_state'] = streaming_state if not self.ctc else None
 
         # final layer: computing softmax
-        logprobs = self.generator[0](output_dict)
-        output_dict['logprobs'] = logprobs
+        if not self.ctc:
+            logprobs = self.generator[0](output_dict)
+            output_dict['logprobs'] = logprobs
 
         if self.encoder.language_classifier:  # make language classification
             logprobs_lan = self.generator[1](encoder_output)
@@ -792,6 +816,17 @@ class Transformer(NMTModel):
 
             # learn weights for mapping (g in the paper)
             output_dict['hidden'] = self.mirror_g(output_dict['hidden'])
+
+        # compute the logits for each encoder step
+        if self.ctc:
+            output_dict['encoder_logits'] = self.generator[0](output_dict, input_name='context')
+            # context T x B x H, so is encoder_logits originally
+            # permute encoder_logits to B x H x T, since upsampler works with
+            # minibatch x channels x [optional depth] x [optional height] x width
+            # encoder_logits = self.generator[0](output_dict, input_name='context').permute(1, 2, 0)
+            # permute back to T x B x H
+            # output_dict['encoder_logits'] = self.ctc_upsampler()
+            #.permute(2, 0, 1)
 
         # # This step removes the padding to reduce the load for the final layer
         # if target_masking is not None:

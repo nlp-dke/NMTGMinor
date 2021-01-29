@@ -14,6 +14,7 @@ import numpy as np
 import apex
 from onmt.inference.fast_translator import FastTranslator
 from onmt.inference.stream_translator import StreamTranslator
+from onmt.inference.ctc_translator import CTCTranslator
 import os
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
@@ -110,6 +111,8 @@ parser.add_argument('-gpu', type=int, default=-1,
                     help="Device to run on")
 parser.add_argument('-fast_translate', action='store_true',
                     help='Using the fast decoder')
+parser.add_argument('-ctc', action='store_true',
+                    help='Using CTC decoder')
 parser.add_argument('-global_search', action='store_true',
                     help='Using the global beam search for streaming')
 parser.add_argument('-dynamic_max_len', action='store_true',
@@ -205,7 +208,9 @@ def main():
         else:
             translator = StreamTranslator(opt)
     else:
-        if opt.fast_translate:
+        if opt.ctc:
+            translator = CTCTranslator(opt)
+        elif opt.fast_translate:
             translator = FastTranslator(opt)
         else:
             translator = onmt.Translator(opt)
