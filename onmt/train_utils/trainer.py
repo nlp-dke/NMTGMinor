@@ -9,7 +9,6 @@ import os
 import re
 import time
 import torch
-torch.set_printoptions(edgeitems=1)
 from apex import amp
 
 import onmt
