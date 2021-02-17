@@ -41,10 +41,11 @@ class MultilingualAdapter(torch.nn.Module):
         :return:
         """
 
-        assert lang.numel() == 1
+        unique_lang_id = torch.unique(lang)
+        assert len(unique_lang_id) == 1
+        # was lang.numel() == 1. Had to change this after giving language tag to tokens:
 
-        index = lang.item()
-
+        index = unique_lang_id.item()   # was lang.item()
         adapter = self.all_modules[index]
 
         # normalize -> transform -> residual

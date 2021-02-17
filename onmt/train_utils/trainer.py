@@ -9,6 +9,7 @@ import os
 import re
 import time
 import torch
+torch.set_printoptions(edgeitems=1)
 from apex import amp
 
 import onmt
@@ -576,10 +577,11 @@ class XETrainer(BaseTrainer):
                 print('Classifier accuracy', (correct_predict / total_predict).data.item())
 
                 if report_cm:
+                    print(cm.cpu().numpy())
                     cm = torch.true_divide(cm, cm.sum(dim=1, keepdim=True)) # divided over true
-                    cm2 = torch.true_divide(cm, cm.sum(dim=0, keepdim=True)) # divided over predicted
-                    print('Confusion matrix (row: true, col: pred):\n', cm.cpu().numpy())
-                    print('Confusion matrix (row: true, col: pred):\n', cm2.cpu().numpy())
+                    cm2 = torch.true_divide(cm, cm.sum(dim=0, keepdim=True))    # divided over predicted
+                    print('Confusion matrix, precision (row: true, col: pred):\n', cm.cpu().numpy())
+                    print('Confusion matrix, recall (row: true, col: pred):\n', cm2.cpu().numpy())
 
         self.model.train()
         return total_loss / total_words, total_adv_loss / total_src_words

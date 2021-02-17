@@ -351,7 +351,8 @@ def main():
                                               cleaning=True, verbose=True,
                                               num_split=len(opt.gpus),
                                               token_level_lang=opt.language_classifier_tok,
-                                              bidirectional=opt.bidirectional_translation)
+                                              bidirectional=opt.bidirectional_translation,
+                                              multidataset=True)
 
                     train_sets.append(train_data)
 
@@ -403,7 +404,8 @@ def main():
                                               cleaning=True, verbose=True, debug=True,
                                               num_split=len(opt.gpus),
                                               token_level_lang=opt.language_classifier_tok,
-                                              bidirectional=opt.bidirectional_translation)
+                                              bidirectional=opt.bidirectional_translation,
+                                              multidataset=True)
 
                     valid_sets.append(valid_data)
 

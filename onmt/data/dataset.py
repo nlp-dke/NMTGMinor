@@ -96,7 +96,7 @@ def collect_fn(src_data, tgt_data,
                src_align_right, tgt_align_right,
                src_type='text',
                augmenter=None, upsampling=False,
-               bilingual=False, token_level_lang=False, vocab_mask=None, bidirectional=False):
+               bilingual=False, token_level_lang=False, vocab_mask=None, bidirectional=False, multidataset=False):
 
     tensors = dict()
     if src_data is not None:
@@ -153,8 +153,10 @@ def collect_fn(src_data, tgt_data,
 
     if src_lang_data is not None:
         tensors['source_lang'] = torch.cat(src_lang_data).long()
-
         if token_level_lang:  # prepare token-level language prediction targets
+            if multidataset:
+                # In case of multi dataset, there's only one language per batch
+                tensors['source_lang'] = tensors['source_lang'].repeat(tensors['source'].shape[1])
             sl_ = tensors['source_lang']  # sl_.shape[0]
             out_dims = (max(src_lengths).item(), sl_.shape[0])  # T, B
             out_tensor = sl_.data.new(*out_dims).fill_(onmt.constants.PAD)
@@ -163,11 +165,15 @@ def collect_fn(src_data, tgt_data,
                 out_tensor[:(src_lengths[i]), i] = v + 1
 
             tensors['targets_source_lang'] = out_tensor
+        # print('PREIDCITON SHAPE', out_tensor.shape)
 
     if tgt_lang_data is not None:
         tensors['target_lang'] = torch.cat(tgt_lang_data).long()
 
-        if token_level_lang and bidirectional:  # prepare token-level language prediction targets
+        if token_level_lang and bidirectional:  # prepare token-level language prediction targets, only do this under bidirectional translation
+            if multidataset:
+                # In case of multi dataset, there's only one language per batch
+                tensors['target_lang'] = tensors['target_lang'].repeat(tensors['target'].shape[1])
             sl_ = tensors['target_lang']  # sl_.shape[0]
             # out_dims = (max(tensors['tgt_lengths']).item(), sl_.shape[0])  # T, B
             out_dims = (max(tgt_lengths), sl_.shape[0])
@@ -438,6 +444,7 @@ class Dataset(torch.utils.data.Dataset):
                  num_split=1,
                  token_level_lang=False,
                  bidirectional=False,
+                 multidataset=False,
                  **kwargs):
         """
         :param src_data: List of tensors for the source side (1D for text, 2 or 3Ds for other modalities)
@@ -668,6 +675,7 @@ class Dataset(torch.utils.data.Dataset):
 
         self.token_level_lang = token_level_lang
         self.bidirectional_translation = bidirectional
+        self.multidataset = multidataset
 
     def size(self):
 
@@ -855,7 +863,8 @@ class Dataset(torch.utils.data.Dataset):
                                   src_type=self._type,
                                   augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask,
                                   token_level_lang=self.token_level_lang,
-                                  bidirectional=self.bidirectional_translation)
+                                  bidirectional=self.bidirectional_translation,
+                                  multidataset=self.multidataset)
                        )
         return batch
 
@@ -900,7 +909,8 @@ class Dataset(torch.utils.data.Dataset):
                                src_type=self._type,
                                augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask,
                                token_level_lang=self.token_level_lang,
-                               bidirectional=self.bidirectional_translation)
+                               bidirectional=self.bidirectional_translation,
+                               multidataset=self.multidataset)
 
             batches.append(batch)
 

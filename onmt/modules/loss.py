@@ -79,7 +79,7 @@ class CrossEntropyLossBase(_Loss):
             loss = nll_loss
         else:
             gtruth = targets.view(-1)  # 1D, (batch X time).
-            scores = scores.view(-1, scores.size(-1))  # 2D, batch * (time X vocab_size)
+            scores = scores.view(-1, scores.size(-1))  # 2D, batch * (time X vocab_size / # labels)
             lprobs = scores
             non_pad_mask = gtruth.ne(self.padding_idx)
             # # gtruth_complement = torch.ones((gtruth.shape[0], gtruth.max()+1), dtype=torch.long).to(device='cuda')
