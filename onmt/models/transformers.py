@@ -391,7 +391,14 @@ class TransformerEncoder(nn.Module):
         # on the output, since the output can grow very large, being the sum of
         # a whole stack of unnormalized layer outputs.
         context = self.postprocess_layer(context)
-
+        if self.save_activation is not None:
+            padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
+            try:
+                saved_att = torch.load(self.save_activation + '.norm')
+            except OSError:
+                saved_att = defaultdict(list)
+            saved_att[-1].append(padded_context)
+            torch.save(saved_att, self.save_activation + '.norm')
         output_dict['context'] = context
         output_dict['src_mask'] = mask_src
         # {'context': context, 'src_mask': mask_src}
