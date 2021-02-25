@@ -301,6 +301,8 @@ def make_parser(parser):
                         help='Whether to use a language classifier (sent level)')
     parser.add_argument('-language_classifer_mid_layer_size', type=int, default=0,
                         help='If > 0, add aother FC layer for language classifier of this size.')
+    parser.add_argument('-en_id', type=int, default=None,
+                        help='If not none, when classifying languages, only distinguish between en and non-en')
 
     parser.add_argument('-token_classifier_at', type=int, default=None,
                         help='Where to do token-level classification. 1 (1st)|-1 (last)|0 (all)|None')
@@ -490,6 +492,9 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'bidirectional_translation'):
         opt.bidirectional_translation = False
+
+    if not hasattr(opt, 'en_id'):
+        opt.en_id = None
 
     if not hasattr(opt, 'buffer_size'):
         opt.buffer_size = 16

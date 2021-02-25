@@ -102,7 +102,8 @@ def main():
                                           upsampling=opt.upsampling,
                                           token_level_lang=opt.language_classifier_tok,
                                           num_split=len(opt.gpus),
-                                          bidirectional=opt.bidirectional_translation)
+                                          bidirectional=opt.bidirectional_translation,
+                                          en_id=opt.en_id)
             else:
                 train_data = onmt.StreamDataset(train_dict['src'], train_dict['tgt'],
                                                 src_sizes=None, tgt_sizes=None,
@@ -112,7 +113,8 @@ def main():
                                                 batch_size_sents=opt.batch_size_sents,
                                                 multiplier=opt.batch_size_multiplier,
                                                 augment=opt.augment_speech,
-                                                upsampling=opt.upsampling)
+                                                upsampling=opt.upsampling,
+                                                en_id=opt.en_id)
 
             if valid_dict['src_lang'] is not None:
                 assert 'langs' in dicts
@@ -136,7 +138,8 @@ def main():
                                           batch_size_sents=opt.batch_size_sents,
                                           upsampling=opt.upsampling,
                                           token_level_lang=opt.language_classifier_tok,
-                                          bidirectional=opt.bidirectional_translation)
+                                          bidirectional=opt.bidirectional_translation,
+                                          en_id=opt.en_id)
             else:
                 valid_data = onmt.StreamDataset(valid_dict['src'], valid_dict['tgt'],
                                                 src_sizes=None, tgt_sizes=None,
@@ -198,6 +201,7 @@ def main():
                 data_type = 'text'
 
             if not opt.streaming:
+                print('________________________________', opt.en_id)
                 train_data = onmt.Dataset(train_src,
                                           train_tgt,
                                           train_src_sizes, train_tgt_sizes,
@@ -212,7 +216,8 @@ def main():
                                           cleaning=True, verbose=True,
                                           num_split=len(opt.gpus),
                                           token_level_lang=opt.language_classifier_tok,
-                                          bidirectional=opt.bidirectional_translation)
+                                          bidirectional=opt.bidirectional_translation,
+                                          en_id=opt.en_id)
             else:
                 train_data = onmt.StreamDataset(train_src,
                                                 train_tgt,
@@ -260,7 +265,8 @@ def main():
                                           cleaning=True, verbose=True, debug=True,
                                           num_split=len(opt.gpus),
                                           token_level_lang=opt.language_classifier_tok,
-                                          bidirectional=opt.bidirectional_translation)
+                                          bidirectional=opt.bidirectional_translation,
+                                          en_id=opt.en_id)
             else:
                 # for validation data, we have to go through sentences (very slow but to ensure correctness)
                 valid_data = onmt.StreamDataset(valid_src, valid_tgt,

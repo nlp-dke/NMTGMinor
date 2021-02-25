@@ -96,7 +96,7 @@ def collect_fn(src_data, tgt_data,
                src_align_right, tgt_align_right,
                src_type='text',
                augmenter=None, upsampling=False,
-               bilingual=False, token_level_lang=False, vocab_mask=None, bidirectional=False, multidataset=False):
+               bilingual=False, token_level_lang=False, vocab_mask=None, bidirectional=False, multidataset=False, en_id=None):
 
     tensors = dict()
     if src_data is not None:
@@ -163,9 +163,14 @@ def collect_fn(src_data, tgt_data,
             for i, v in enumerate(sl_):
                 # lan ID starts with 0, but pred label values should start with 1 (due to padding)
                 out_tensor[:(src_lengths[i]), i] = v + 1
+            # print('PREDICTION SHAPE, before', out_tensor)
 
+            # Convert labels to en vs non-en
+            if en_id:
+                out_tensor[out_tensor == en_id] = 1
+                torch.logical_and(out_tensor != en_id, out_tensor != onmt.constants.PAD)
+                out_tensor[torch.logical_and(out_tensor != en_id, out_tensor != onmt.constants.PAD)] = 2
             tensors['targets_source_lang'] = out_tensor
-        # print('PREIDCITON SHAPE', out_tensor.shape)
 
     if tgt_lang_data is not None:
         tensors['target_lang'] = torch.cat(tgt_lang_data).long()
@@ -445,6 +450,7 @@ class Dataset(torch.utils.data.Dataset):
                  token_level_lang=False,
                  bidirectional=False,
                  multidataset=False,
+                 en_id=None,
                  **kwargs):
         """
         :param src_data: List of tensors for the source side (1D for text, 2 or 3Ds for other modalities)
@@ -676,6 +682,7 @@ class Dataset(torch.utils.data.Dataset):
         self.token_level_lang = token_level_lang
         self.bidirectional_translation = bidirectional
         self.multidataset = multidataset
+        self.en_id = en_id
 
     def size(self):
 
@@ -864,7 +871,8 @@ class Dataset(torch.utils.data.Dataset):
                                   augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask,
                                   token_level_lang=self.token_level_lang,
                                   bidirectional=self.bidirectional_translation,
-                                  multidataset=self.multidataset)
+                                  multidataset=self.multidataset,
+                                  en_id=self.en_id)
                        )
         return batch
 
@@ -910,7 +918,8 @@ class Dataset(torch.utils.data.Dataset):
                                augmenter=self.augmenter, upsampling=self.upsampling, vocab_mask=self.vocab_mask,
                                token_level_lang=self.token_level_lang,
                                bidirectional=self.bidirectional_translation,
-                               multidataset=self.multidataset)
+                               multidataset=self.multidataset,
+                               en_id=self.en_id)
 
             batches.append(batch)
 

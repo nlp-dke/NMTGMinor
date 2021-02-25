@@ -240,6 +240,7 @@ class TransformerEncoder(nn.Module):
         self.language_classifier_sent = opt.language_classifier_sent
 
         self.token_classifier_at = opt.token_classifier_at
+        self.language_specific_encoder = opt.language_specific_encoder
 
 
     def build_modules(self, opt):
@@ -289,6 +290,19 @@ class TransformerEncoder(nn.Module):
                                  opt=opt)
 
             self.layer_modules.append(block)
+
+        # if language_specific_encoder == number of encoder layers + 1:
+        # put adapter at the very last (after the final layer norm)
+        if opt.language_specific_encoder and (opt.language_specific_encoder[0] == self.layers+1):
+            print('*** After full encoder + adapter')
+            self.add_adapter = True
+            adapter_bottleneck_size = opt.model_size // 2
+            from onmt.modules.multilingual_factorized.multilingual_adapters import MultilingualAdapter
+            self.adapters = MultilingualAdapter(model_size=opt.model_size, bottleneck_size=adapter_bottleneck_size,
+                                                n_languages=opt.n_languages,
+                                                dropout=opt.dropout, variational=opt.variational_dropout)
+        else:
+            self.add_adapter = False
 
         # self.layer_modules = nn.ModuleList(
         #     [EncoderLayer(self.n_heads, self.model_size, self.dropout, self.inner_size,
@@ -391,6 +405,10 @@ class TransformerEncoder(nn.Module):
         # on the output, since the output can grow very large, being the sum of
         # a whole stack of unnormalized layer outputs.
         context = self.postprocess_layer(context)
+
+        if self.add_adapter:
+            context = self.adapters(context, input_lang)
+
         if self.save_activation is not None:
             padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
             try:

@@ -43,6 +43,31 @@ class XEAdversarialTrainer(XETrainer):
     def __init__(self, model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer=True):
         super().__init__(model, loss_function, train_data, valid_data, dicts, opt, setup_optimizer)
 
+        if setup_optimizer:
+
+            self.optim2 = onmt.Optim(opt)
+            self.optim2.lr = 0.001
+            self.optim2.update_method = 'regular'
+            self.optim2.set_parameters(self.model.parameters())
+
+            if not self.opt.fp16:
+                opt_level = "O0"
+                keep_batchnorm_fp32 = False
+            elif self.opt.fp16_mixed:
+                opt_level = "O1"
+                keep_batchnorm_fp32 = None
+            else:
+                opt_level = "O2"
+                keep_batchnorm_fp32 = False
+
+            if self.cuda:
+                self.model, self.optim2.optimizer = amp.initialize(self.model,
+                                                                  self.optim2.optimizer,
+                                                                  opt_level=opt_level,
+                                                                  keep_batchnorm_fp32=keep_batchnorm_fp32,
+                                                                  loss_scale="dynamic",
+                                                                  verbosity=1)
+
     def train_epoch(self, epoch, resume=False, itr_progress=None):
         global rec_ppl
         opt = self.opt
@@ -77,7 +102,7 @@ class XEAdversarialTrainer(XETrainer):
         num_accumulated_sents = 0
         denom = 3584
         nan = False
-        optimize_classifier = True
+        optimize_classifier = False
 
         if opt.streaming:
             streaming_state = self.model.init_stream()
@@ -100,7 +125,7 @@ class XEAdversarialTrainer(XETrainer):
 
             oom = False
             try:
-                # Fetch ground truths
+                # Fetch ground truths for MT
                 targets = batch.get('target_output')
 
                 tgt_mask = targets.data.ne(onmt.constants.PAD)
@@ -118,25 +143,26 @@ class XEAdversarialTrainer(XETrainer):
                 loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
 
                 optimizer = self.optim.optimizer
+                optimizer_classifier = self.optim2.optimizer
+                # use 2nd loss
+                alternate = epoch >= opt.adversarial_classifier_start_from
 
-                if epoch % 2 == 0:
+                if not optimize_classifier: #epoch % 2 == 0:
                     # freeze classifier
                     self.model.generator[1].requires_grad_(False)
                     # unfreeze enc & dec
                     self.model.encoder.requires_grad_(True)
                     self.model.decoder.requires_grad_(True)
-                    # use 2nd loss
-                    use_second_loss = epoch >= opt.adversarial_classifier_start_from
 
                     # calculate gradient for enc & dec
                     if self.cuda:
                         with amp.scale_loss(loss, optimizer) as scaled_loss:
-                            scaled_loss.backward(retain_graph=use_second_loss)
+                            scaled_loss.backward(retain_graph=alternate)
                     else:
-                        loss.backward(retain_graph=use_second_loss)
+                        loss.backward(retain_graph=alternate)
 
                     # gradient from classifier
-                    if use_second_loss:
+                    if alternate:
                         if self.opt.token_classifier == 0:  # language ID
                             targets_classifier = batch.get('targets_source_lang')
                         elif self.opt.token_classifier == 1:  # predict source token ID
@@ -168,8 +194,8 @@ class XEAdversarialTrainer(XETrainer):
                     else:
                         classifier_loss_data, classifier_loss_data_rev = 0, 0
 
-                else:
-                    # freeze enc & dec
+                elif alternate:
+                    # freeze enc & dec, only train classifier
                     self.model.generator[1].requires_grad_(True)
                     self.model.encoder.requires_grad_(False)
                     self.model.decoder.requires_grad_(False)
@@ -196,7 +222,7 @@ class XEAdversarialTrainer(XETrainer):
                     classifier_loss_data_rev = 0
                     # calc gradient for lan classifier
                     if self.cuda:
-                        with amp.scale_loss(classifier_loss, optimizer) as scaled_loss:
+                        with amp.scale_loss(classifier_loss, optimizer_classifier) as scaled_loss:
                             scaled_loss.backward()
                     else:
                         classifier_loss.backward()
@@ -230,23 +256,36 @@ class XEAdversarialTrainer(XETrainer):
 
                 #   We only update the parameters after getting gradients from n mini-batches
                 update_flag = False
-                if 0 < opt.batch_size_update <= num_accumulated_words:
+                if counter >= opt.update_frequency > 0:     # if update_frequency==1, always update here
                     update_flag = True
-                elif counter >= opt.update_frequency and 0 >= opt.batch_size_update:
+                elif 0 < opt.batch_size_update <= num_accumulated_words:    # accmulate x words
                     update_flag = True
-                elif i == n_samples - 1:  # update for the last minibatch
+                elif i == n_samples:  # update for the last minibatch
                     update_flag = True
+                # it was this:
+                # if 0 < opt.batch_size_update <= num_accumulated_words:
+                #     update_flag = True
+                # elif counter >= opt.update_frequency and 0 >= opt.batch_size_update:
+                #     update_flag = True
+                # elif i == n_samples - 1:  # update for the last minibatch
+                #     update_flag = True
 
                 if update_flag:
                     grad_denom = 1 / denom
                     if self.opt.normalize_gradient:
                         grad_denom = num_accumulated_words / denom
                     normalize_gradients(amp.master_params(optimizer), grad_denom)
+                    normalize_gradients(amp.master_params(optimizer_classifier), grad_denom)
                     # Update the parameters.
                     if self.opt.max_grad_norm > 0:
                         torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), self.opt.max_grad_norm)
-                    self.optim.step(grad_denom=grad_denom)
-                    self.optim.zero_grad()
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer_classifier), self.opt.max_grad_norm)
+                    if optimize_classifier:
+                        self.optim2.step(grad_denom=grad_denom)
+                        self.optim2.zero_grad()
+                    else:
+                        self.optim.step(grad_denom=grad_denom)
+                        self.optim.zero_grad()
                     self.model.zero_grad()
                     counter = 0
                     num_accumulated_words = 0
@@ -265,21 +304,20 @@ class XEAdversarialTrainer(XETrainer):
                     update_counter += 1
 
                 # TODO: how to make this less hand crafty?!
-                # if epoch >= opt.adversarial_classifier_start_from and \
-                #         (not optimize_classifier and update_counter >= 10) or \
-                #         (optimize_classifier and update_counter >= 500):
-                #     print('============optimize_classifier <--', optimize_classifier)
-                #     optimize_classifier = not optimize_classifier
-                #     update_counter = 0
-                #     valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True, report_cm=True)
-                #     valid_ppl = math.exp(min(valid_loss, 100))
-                #     print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
-                #     print('============optimize_classifier -->', optimize_classifier)
+                    if alternate and ((not optimize_classifier and update_counter >= 1) or \
+                        (optimize_classifier and update_counter >= 5)):
+                        print('============optimize_classifier <--', optimize_classifier)
+                        optimize_classifier = not optimize_classifier
+                        update_counter = 0
+                        valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True, report_cm=False)
+                        valid_ppl = math.exp(min(valid_loss, 100))
+                        print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
+                        print('============optimize_classifier -->', optimize_classifier)
 
                 num_words = tgt_size
                 report_loss += loss_data
-                report_classifier_loss += classifier_loss_data if self.opt.language_classifier else 0
-                report_classifier_loss_rev += classifier_loss_data_rev if self.opt.language_classifier else 0
+                report_classifier_loss += classifier_loss_data if alternate else 0
+                report_classifier_loss_rev += classifier_loss_data_rev if alternate else 0
                 report_tgt_words += num_words
                 report_src_words += src_size
                 total_loss += loss_data
