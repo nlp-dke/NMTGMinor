@@ -276,6 +276,8 @@ def make_parser(parser):
     parser.add_argument('-language_specific_encoder', default=[], nargs='+', type=int,
                         help="Where to add language-specific adapters."
                              "1 (all layers)")
+    parser.add_argument('-adapter_death_rate',  type=float, default=0.0,
+                        help='If positive, stochastically drop adapters')
 
     parser.add_argument('-bidirectional_translation', action='store_true',
                         help="Whether to translate src -> tgt, tgt -> src simultaneously, given src -> tgt data")
@@ -298,7 +300,7 @@ def make_parser(parser):
     parser.add_argument('-language_classifier_tok', action='store_true',
                         help='Whether to use a language classifier (tok level)')
     parser.add_argument('-language_classifier_sent', action='store_true',
-                        help='Whether to use a language classifier (sent level)')
+                        help='Whether to use a language classifier (sent level) Not implemented yet!')
     parser.add_argument('-language_classifer_mid_layer_size', type=int, default=0,
                         help='If > 0, add aother FC layer for language classifier of this size.')
     parser.add_argument('-en_id', type=int, default=None,
@@ -507,5 +509,8 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'language_specific_encoder'):
         opt.language_specific_encoder = []
+
+    if not hasattr(opt, 'adapter_death_rate'):
+        opt.adapter_death_rate = 0.0
 
     return opt

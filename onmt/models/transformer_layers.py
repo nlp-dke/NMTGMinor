@@ -154,7 +154,8 @@ class EncoderLayer(nn.Module):
             from onmt.modules.multilingual_factorized.multilingual_adapters import MultilingualAdapter
             self.adapters = MultilingualAdapter(model_size=opt.model_size, bottleneck_size=adapter_bottleneck_size,
                                                 n_languages=opt.n_languages,
-                                                dropout=opt.dropout, variational=self.variational)
+                                                dropout=opt.dropout, variational=self.variational,
+                                                death_rate=opt.adapter_death_rate)
             
     def forward(self, input, attn_mask, given_query=None, att_plot_path=None,
                 src_lang=None, incremental=False, incremental_cache=None, mems=None):

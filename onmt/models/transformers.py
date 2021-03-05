@@ -259,7 +259,6 @@ class TransformerEncoder(nn.Module):
             if change_residual_here:
                 print('*** Layer (indexing from 0)', _l, 'change residual to code', self.change_residual)
                 change_residual = self.change_residual
-
             change_att_query = None
             change_att_query_here = (self.change_att_query_at == 0) or \
                                     (self.change_att_query_at == _l + 1) or \
