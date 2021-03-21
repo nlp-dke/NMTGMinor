@@ -285,8 +285,11 @@ def make_parser(parser):
                         help='Type of auxilliary loss to encourage language similarity.'
                              '1st digit: 1 (meanpool over time) | 2 (by position) | 3 (maxpool over time) | 4 (maxpool over feature),'
                              '2nd digit: 1 (squared error)...')
+    parser.add_argument('-sim_loss_update_one', type=int, default=None,
+                        help='If not None, update only the src or tgt encoder.')
     parser.add_argument('-aux_loss_weight', type=float, default=0.0,
                         help='Weight for the auxiliary loss')
+
 
     parser.add_argument('-freeze_encoder', action='store_true',
                         help='Whether to freeze encoder')
@@ -497,6 +500,9 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'en_id'):
         opt.en_id = None
+
+    if not hasattr(opt, 'sim_loss_update_one'):
+        opt.sim_loss_update_one = None
 
     if not hasattr(opt, 'buffer_size'):
         opt.buffer_size = 16
