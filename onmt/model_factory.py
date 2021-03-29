@@ -36,7 +36,7 @@ def build_tm_model(opt, dicts):
     # BUILD POSITIONAL ENCODING
     if opt.time == 'positional_encoding':
         positional_encoder = PositionalEncoding(opt.model_size, len_max=MAX_LEN,
-                                                fixed_encoding=opt.learnable_position_encoding)
+                                                fixed_encoding=not opt.learnable_position_encoding)
     else:
         raise NotImplementedError
 

@@ -366,52 +366,57 @@ class PositionalEncoding(nn.Module):
         self.data_type = None
         self.fixed_encoding = fixed_encoding
 
-        if self.fixed_encoding:
+        if fixed_encoding:
             self.renew(len_max)
         else:
-            self.pos_emb = nn.Embedding(num_embeddings=len_max, embedding_dim=d_model)
+            self.pos_emb = nn.Embedding(num_embeddings=self.len_max, embedding_dim=self.d_model)
 
         self.p = p
 
     def renew(self, new_max_len):
-        # detele the old variable to avoid Pytorch's error when register new buffer
-        cuda = False
-        if hasattr(self, 'pos_emb'):
-            cuda = self.pos_emb.is_cuda
-            # self.data_type = torch.type(self.pos_emb)
-            del self.pos_emb
 
-        position = torch.arange(0, new_max_len).float()
+        if self.fixed_encoding:
+            # detele the old variable to avoid Pytorch's error when register new buffer
+            cuda = False
+            if hasattr(self, 'pos_emb'):
+                cuda = self.pos_emb.is_cuda
+                # self.data_type = torch.type(self.pos_emb)
+                del self.pos_emb
 
-        num_timescales = self.d_model // 2
-        log_timescale_increment = math.log(10000) / (num_timescales - 1)
-        inv_timescales = torch.exp(torch.arange(0, num_timescales).float() * -log_timescale_increment)
-        scaled_time = position.unsqueeze(1) * inv_timescales.unsqueeze(0)
-        pos_emb = torch.cat((torch.sin(scaled_time), torch.cos(scaled_time)), 1)
+            position = torch.arange(0, new_max_len).float()
 
-        if cuda:
-            pos_emb = pos_emb.cuda()
+            num_timescales = self.d_model // 2
+            log_timescale_increment = math.log(10000) / (num_timescales - 1)
+            inv_timescales = torch.exp(torch.arange(0, num_timescales).float() * -log_timescale_increment)
+            scaled_time = position.unsqueeze(1) * inv_timescales.unsqueeze(0)
+            pos_emb = torch.cat((torch.sin(scaled_time), torch.cos(scaled_time)), 1)
 
-        if self.data_type is not None:
-            pos_emb.type(self.data_type)
-        # wrap in a buffer so that model can be moved to GPU
-        self.register_buffer('pos_emb', pos_emb)
-        # self.data_type = self.pos_emb.type()
-        self.len_max = new_max_len
+            if cuda:
+                pos_emb = pos_emb.cuda()
 
-        # added with shorter wave length
-        log_timescale_increment_ = math.log(10) / (num_timescales - 1)
-        inv_timescales_ = torch.exp(torch.arange(0, num_timescales).float() * -log_timescale_increment_)
-        scaled_time_ = position.unsqueeze(1) * inv_timescales_.unsqueeze(0)
-        pos_emb_short = torch.cat((torch.sin(scaled_time_), torch.cos(scaled_time_)), 1)
+            if self.data_type is not None:
+                pos_emb.type(self.data_type)
+            # wrap in a buffer so that model can be moved to GPU
+            self.register_buffer('pos_emb', pos_emb)
+            # self.data_type = self.pos_emb.type()
+            self.len_max = new_max_len
 
-        if cuda:
-            pos_emb_short = pos_emb_short.cuda()
+            # added with shorter wave length
+            log_timescale_increment_ = math.log(10) / (num_timescales - 1)
+            inv_timescales_ = torch.exp(torch.arange(0, num_timescales).float() * -log_timescale_increment_)
+            scaled_time_ = position.unsqueeze(1) * inv_timescales_.unsqueeze(0)
+            pos_emb_short = torch.cat((torch.sin(scaled_time_), torch.cos(scaled_time_)), 1)
 
-        if self.data_type is not None:
-            pos_emb_short.type(self.data_type)
-        # wrap in a buffer so that model can be moved to GPU
-        self.register_buffer('pos_emb_short', pos_emb_short)
+            if cuda:
+                pos_emb_short = pos_emb_short.cuda()
+
+            if self.data_type is not None:
+                pos_emb_short.type(self.data_type)
+            # wrap in a buffer so that model can be moved to GPU
+            self.register_buffer('pos_emb_short', pos_emb_short)
+
+        else:   # Don't renew learned embedding.
+            pass
 
     def forward(self, word_emb, t=None, change_code=None):
 
@@ -458,7 +463,11 @@ class PositionalEncoding(nn.Module):
             if len_seq > self.len_max:
                 raise ValueError('Input seq exceeds embedding size')
 
-            pos_idx = torch.arange(len_seq).to(word_emb.device)
-            out = word_emb + self.pos_emb(pos_idx)
+            if word_emb.size(1) == len_seq:
+                pos_idx = torch.arange(len_seq).to(word_emb.device)
+                out = word_emb + self.pos_emb(pos_idx)
+            else:   # at decoding time, only need to add pos_emb on one position
+                pos_idx = torch.arange(len_seq-1, len_seq).to(word_emb.device)
+                out = word_emb + self.pos_emb(pos_idx).unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
 
         return out
