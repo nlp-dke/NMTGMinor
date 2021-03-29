@@ -696,8 +696,18 @@ class XETrainer(BaseTrainer):
                             loss.backward(retain_graph=use_aux_loss)
 
                         if use_aux_loss and self.aux_loss_function:
-                            aux_loss_dict = self.aux_loss_function(outputs_rev['context'], outputs['context'],
-                                                                   outputs_rev['src_mask'], outputs['src_mask'])
+                            # print('===============', opt.sim_loss_update_one)
+                            if opt.sim_loss_update_one is None:
+                                aux_loss_dict = self.aux_loss_function(outputs_rev['context'], outputs['context'],
+                                                                       outputs_rev['src_mask'], outputs['src_mask'])
+                            elif opt.sim_loss_update_one == 0:
+                                aux_loss_dict = self.aux_loss_function(outputs_rev['context'].detach(), outputs['context'],
+                                                                       outputs_rev['src_mask'], outputs['src_mask'])
+                            elif opt.sim_loss_update_one == 1:
+                                aux_loss_dict = self.aux_loss_function(outputs_rev['context'], outputs['context'].detach(),
+                                                                       outputs_rev['src_mask'], outputs['src_mask'])
+                            else:
+                                raise NotImplementedError()
                             aux_loss_data = aux_loss_dict['data']
                             loss = aux_loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
 
