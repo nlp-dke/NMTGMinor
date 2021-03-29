@@ -357,15 +357,19 @@ class PositionalEncoding(nn.Module):
         
     """
 
-    def __init__(self, d_model, p=0, len_max=512):
+    def __init__(self, d_model, p=0, len_max=512, fixed_encoding=True):
         # save a fixed positional embedding matrix up to len_max,
         # so that no need to recreate it everytime
         super(PositionalEncoding, self).__init__()
         self.len_max = len_max
         self.d_model = d_model
         self.data_type = None
+        self.fixed_encoding = fixed_encoding
 
-        self.renew(len_max)
+        if self.fixed_encoding:
+            self.renew(len_max)
+        else:
+            self.pos_emb = nn.Embedding(num_embeddings=len_max, embedding_dim=d_model)
 
         self.p = p
 
@@ -415,38 +419,46 @@ class PositionalEncoding(nn.Module):
 
         self.data_type = word_emb.type()
 
-        if len_seq > self.len_max:
-            self.renew(len_seq)
+        if self.fixed_encoding:
+            if len_seq > self.len_max:
+                self.renew(len_seq)
 
-        if change_code == 2:
-            if word_emb.size(1) == len_seq:
-                time_ = self.pos_emb[-len_seq:, :].type_as(word_emb)
-                out = word_emb + time_
-            else:
-                time_emb = self.pos_emb[-(len_seq - 1), :]  # 1 x dim
-                out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
+            if change_code == 2:
+                if word_emb.size(1) == len_seq:
+                    time_ = self.pos_emb[-len_seq:, :].type_as(word_emb)
+                    out = word_emb + time_
+                else:
+                    time_emb = self.pos_emb[-(len_seq - 1), :]  # 1 x dim
+                    out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
 
-        elif change_code == 3:
-            if word_emb.size(1) == len_seq:
-                time_ = self.pos_emb_short[:len_seq, :].type_as(word_emb)
-                out = word_emb + time_
+            elif change_code == 3:
+                if word_emb.size(1) == len_seq:
+                    time_ = self.pos_emb_short[:len_seq, :].type_as(word_emb)
+                    out = word_emb + time_
+                else:
+                    # out = word_emb + Variable(self.pos_emb[:len_seq, :][-1, :], requires_grad=False)
+                    time_emb = self.pos_emb_short[len_seq - 1, :]  # 1 x dim
+                    # out should have size bs x 1 x dim
+                    out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
+
             else:
-                # out = word_emb + Variable(self.pos_emb[:len_seq, :][-1, :], requires_grad=False)
-                time_emb = self.pos_emb_short[len_seq - 1, :]  # 1 x dim
-                # out should have size bs x 1 x dim
-                out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
+                if word_emb.size(1) == len_seq:
+                    time_ = self.pos_emb[:len_seq, :].type_as(word_emb)
+                    out = word_emb + time_
+                else:
+                    # out = word_emb + Variable(self.pos_emb[:len_seq, :][-1, :], requires_grad=False)
+                    time_emb = self.pos_emb[len_seq - 1, :]  # 1 x dim
+                    # out should have size bs x 1 x dim
+                    out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
+
+            if change_code is not None:
+                out -= word_emb
 
         else:
-            if word_emb.size(1) == len_seq:
-                time_ = self.pos_emb[:len_seq, :].type_as(word_emb)
-                out = word_emb + time_
-            else:
-                # out = word_emb + Variable(self.pos_emb[:len_seq, :][-1, :], requires_grad=False)
-                time_emb = self.pos_emb[len_seq - 1, :]  # 1 x dim
-                # out should have size bs x 1 x dim
-                out = word_emb + time_emb.unsqueeze(0).repeat(word_emb.size(0), 1, 1).type_as(word_emb)
+            if len_seq > self.len_max:
+                raise ValueError('Input seq exceeds embedding size')
 
-        if change_code is not None:
-            out -= word_emb
+            pos_idx = torch.arange(len_seq).to(word_emb.device)
+            out = word_emb + self.pos_emb(pos_idx)
 
         return out
