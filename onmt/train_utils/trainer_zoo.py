@@ -102,7 +102,7 @@ class XEAdversarialTrainer(XETrainer):
         num_accumulated_sents = 0
         denom = 3584
         nan = False
-        optimize_classifier = False
+        optimize_classifier = True
 
         if opt.streaming:
             streaming_state = self.model.init_stream()
@@ -304,15 +304,16 @@ class XEAdversarialTrainer(XETrainer):
                     update_counter += 1
 
                 # TODO: how to make this less hand crafty?!
-                    if alternate and ((not optimize_classifier and update_counter >= 1) or \
-                        (optimize_classifier and update_counter >= 5)):
-                        print('============optimize_classifier <--', optimize_classifier)
-                        optimize_classifier = not optimize_classifier
+                    if alternate and ((not optimize_classifier and update_counter >= 10) or \
+                        (optimize_classifier and update_counter >= 50)):
+
                         update_counter = 0
                         valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True, report_cm=False)
                         valid_ppl = math.exp(min(valid_loss, 100))
-                        print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
-                        print('============optimize_classifier -->', optimize_classifier)
+                        print('============optimize_classifier <--', optimize_classifier)
+                        print('Validation perplexity: %g, adv loss: %6.6f\n' % (valid_ppl, valid_adv_loss))
+                        # print('============optimize_classifier -->', optimize_classifier)
+                        optimize_classifier = not optimize_classifier
 
                 num_words = tgt_size
                 report_loss += loss_data
