@@ -70,15 +70,16 @@ class NMTModel(nn.Module):
         
         def condition(param_name):
             # don't load these buffers (more like a bug)
-            if 'positional_encoder' in param_name:
-                return False
-            if 'time_transformer' in param_name:
-                if self.encoder is not None and self.encoder.time == 'positional_encoding':
-                    return False
+            # if 'positional_encoder' in param_name:
+            #     return False
+            # if 'time_transformer' in param_name:
+            #     if self.encoder is not None and self.encoder.time == 'positional_encoding':
+            #         return False
             if param_name == 'decoder.mask':
                 return False
             # if 'generator.1' in param_name:  #TODO: need to when training classifier
             #     return False
+            print('*** Loading parameter', param_name)
             return True
 
         # restore old generated if necessary for loading
