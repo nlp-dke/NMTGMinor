@@ -475,9 +475,6 @@ class MSEEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # meanpool_tensor = torch.sum(input_tensor.float().masked_fill(mask_, 0).type_as(input_tensor), dim=0,
-            #                             keepdim=True) / (1 - mask_.float()).sum(dim=0)
-
             # (T, B, H) / (T, B, H)
             input1 = torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)
             input2 = torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)
@@ -503,8 +500,15 @@ class MSEEncoderLoss(_Loss):
             l2_loss = l2_loss.sum()
 
         elif self.input_type == 3:
-            input1, _ = torch.max(context1, dim=0)     # (T1, B, D) --> (B, D)
-            input2, _ = torch.max(context2, dim=0)     # (T2, B, D) --> (B, D)
+            mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
+            mask2_ = mask2.permute(2, 0, 1)
+
+            masked_context1 = context1.masked_fill(mask1_, float("-Inf")).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, float("-Inf")).type_as(context2)
+
+            # (T, B, H)
+            input1, _ = torch.max(masked_context1, dim=0)   # (T1, B, D) --> (B, D)
+            input2, _ = torch.max(masked_context2, dim=0)   # (T2, B, D) --> (B, D)
 
             l2_loss = (input1 - input2) ** 2
             # multiply by seq length to make aux. loss weight comparable
@@ -529,6 +533,7 @@ class MSEEncoderLoss(_Loss):
             l2_loss = (input1 - input2) ** 2
             # multiply by seq length to make aux. loss weight comparable
             l2_loss = l2_loss.sum() * 2
+
         elif self.input_type == 5:      # meanpool + position by position
             mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
             mask2_ = mask2.permute(2, 0, 1)
@@ -558,6 +563,27 @@ class MSEEncoderLoss(_Loss):
             l2_loss += ((input1 - input2) ** 2).sum()
             l2_loss /= 2.0
 
+        elif self.input_type == 6:  # meanpool and maxpool
+            mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
+            mask2_ = mask2.permute(2, 0, 1)
+
+            masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
+
+            # (T, B, H) / (T, B, H)
+            input1_meanpool = (torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)).squeeze()
+            input2_meanpool = (torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)).squeeze()
+
+            masked_context1 = context1.masked_fill(mask1_, float("-Inf")).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, float("-Inf")).type_as(context2)
+
+            # (T, B, H)
+            input1_maxpool, _ = torch.max(masked_context1, dim=0)   # (T1, B, D) --> (B, D)
+            input2_maxpool, _ = torch.max(masked_context2, dim=0)   # (T2, B, D) --> (B, D)
+
+            l2_loss = (torch.cat((input1_meanpool, input1_maxpool)) - torch.cat((input2_meanpool, input2_maxpool))) ** 2
+            l2_loss = l2_loss.sum() * min(context1.shape[0], context1.shape[1])
+            l2_loss /= 2.0
         else:
             raise NotImplementedError
 

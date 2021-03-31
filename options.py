@@ -283,8 +283,9 @@ def make_parser(parser):
                         help="Whether to translate src -> tgt, tgt -> src simultaneously, given src -> tgt data")
     parser.add_argument('-sim_loss_type', type=int, default=None,
                         help='Type of auxilliary loss to encourage language similarity.'
-                             '1st digit: 1 (meanpool over time) | 2 (by position) | 3 (maxpool over time) | 4 (maxpool over feature),'
-                             '2nd digit: 1 (squared error)...')
+                             '1nd digit: 1 (squared error)...'
+                             '2st digit: 1 (meanpool over time) | 2 (by position) | 3 (maxpool over time) | 4 (maxpool over feature),'
+                        )
     parser.add_argument('-sim_loss_update_one', type=int, default=None,
                         help='If not None, update only the src or tgt encoder.')
     parser.add_argument('-aux_loss_weight', type=float, default=0.0,
