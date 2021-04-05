@@ -117,11 +117,11 @@ class NMTLossFunc(CrossEntropyLossBase):
         self.label_smoothing = label_smoothing
         self.mirror = mirror
 
-        self.aux_loss_code = aux_loss_code
-        if self.aux_loss_code is not None:
-            self.sim_loss_base = self.aux_loss_code // 10
-            self.sim_loss_type = self.aux_loss_code % 10
-            self.aux_loss_weight = aux_loss_weight
+        # self.aux_loss_code = aux_loss_code
+        # if self.aux_loss_code is not None:
+        #     self.sim_loss_base = self.aux_loss_code // 10
+        #     self.sim_loss_type = self.aux_loss_code % 10
+        #     self.aux_loss_weight = aux_loss_weight
 
     def forward(self, model_outputs, targets, model=None, backward=False, normalizer=1, lan_classifier=False,
                 reverse_landscape=False, **kwargs):
@@ -183,57 +183,57 @@ class NMTLossFunc(CrossEntropyLossBase):
         if backward:
             total_loss.div(normalizer).backward()
 
-        if self.aux_loss_code is not None and 'context_main' in model_outputs:  # use aux loss & is training time
-            # context is T x B x H, e.g. 10, 128, 512
-            b_size = model_outputs['context_main'].shape[1]
-            if self.sim_loss_base == 1:  # position by position difference, shorter one
-                diff = model_outputs['context_main'] - model_outputs['context_aux']
-                src_mask = model_outputs['src_mask'].permute(2, 0, 1)  # B, H, T
-                diff = diff.float().masked_fill_(src_mask, 0).type_as(diff)  #inplace
-            elif self.sim_loss_base == 2:  # max pool over time
-                # print(torch.max(model_outputs['context_main'], 0)[0].shape, model_outputs['context_aux'].shape)
-                src_mask_main = model_outputs['src_mask_main'].permute(2, 0, 1)
-                src_mask_aux = model_outputs['src_mask_aux'].permute(2, 0, 1)
-                main_ = model_outputs['context_main']
-                aux_ = model_outputs['context_aux']
-                masked_main = main_.float().masked_fill(src_mask_main, -float('inf')).type_as(main_)
-                masked_aux = aux_.float().masked_fill(src_mask_aux, -float('inf')).type_as(aux_)
-                repr_main = torch.max(masked_main, 0)[0]
-                repr_aux = torch.max(masked_aux, 0)[0]
-                diff = repr_main - repr_aux
-            elif self.sim_loss_base == 3:  # mean pool over time
-                src_mask_main = model_outputs['src_mask_main'].permute(2, 0, 1)
-                src_mask_aux = model_outputs['src_mask_aux'].permute(2, 0, 1)
-                main_ = model_outputs['context_main']
-                aux_ = model_outputs['context_aux']
-                masked_main = main_.float().masked_fill(src_mask_main, 0).type_as(main_)
-                masked_aux = aux_.float().masked_fill(src_mask_aux, 0).type_as(aux_)
-                repr_main = torch.sum(masked_main, dim=0, keepdim=True) / (1 - src_mask_main.float()).sum(dim=0)
-                repr_aux = torch.sum(masked_aux, dim=0, keepdim=True) / (1 - src_mask_aux.float()).sum(dim=0)
-                diff = repr_main - repr_aux
-            else:
-                raise NotImplementedError
+        # if self.aux_loss_code is not None and 'context_main' in model_outputs:  # use aux loss & is training time
+        #     # context is T x B x H, e.g. 10, 128, 512
+        #     b_size = model_outputs['context_main'].shape[1]
+        #     if self.sim_loss_base == 1:  # position by position difference, shorter one
+        #         diff = model_outputs['context_main'] - model_outputs['context_aux']
+        #         src_mask = model_outputs['src_mask'].permute(2, 0, 1)  # B, H, T
+        #         diff = diff.float().masked_fill_(src_mask, 0).type_as(diff)  #inplace
+        #     elif self.sim_loss_base == 2:  # max pool over time
+        #         # print(torch.max(model_outputs['context_main'], 0)[0].shape, model_outputs['context_aux'].shape)
+        #         src_mask_main = model_outputs['src_mask_main'].permute(2, 0, 1)
+        #         src_mask_aux = model_outputs['src_mask_aux'].permute(2, 0, 1)
+        #         main_ = model_outputs['context_main']
+        #         aux_ = model_outputs['context_aux']
+        #         masked_main = main_.float().masked_fill(src_mask_main, -float('inf')).type_as(main_)
+        #         masked_aux = aux_.float().masked_fill(src_mask_aux, -float('inf')).type_as(aux_)
+        #         repr_main = torch.max(masked_main, 0)[0]
+        #         repr_aux = torch.max(masked_aux, 0)[0]
+        #         diff = repr_main - repr_aux
+        #     elif self.sim_loss_base == 3:  # mean pool over time
+        #         src_mask_main = model_outputs['src_mask_main'].permute(2, 0, 1)
+        #         src_mask_aux = model_outputs['src_mask_aux'].permute(2, 0, 1)
+        #         main_ = model_outputs['context_main']
+        #         aux_ = model_outputs['context_aux']
+        #         masked_main = main_.float().masked_fill(src_mask_main, 0).type_as(main_)
+        #         masked_aux = aux_.float().masked_fill(src_mask_aux, 0).type_as(aux_)
+        #         repr_main = torch.sum(masked_main, dim=0, keepdim=True) / (1 - src_mask_main.float()).sum(dim=0)
+        #         repr_aux = torch.sum(masked_aux, dim=0, keepdim=True) / (1 - src_mask_aux.float()).sum(dim=0)
+        #         diff = repr_main - repr_aux
+        #     else:
+        #         raise NotImplementedError
 
-            if self.sim_loss_type == 1:  # MSE
-                sim_loss = (diff ** 2).sum()
-            else:
-                raise NotImplementedError
-
-            sim_loss_data = (sim_loss / b_size).data.item()  # before applying weights
-            # apply weights
-            if self.aux_loss_weight >= 0:
-                sim_loss = sim_loss * self.aux_loss_weight
-            else:
-                raise NotImplementedError
-
-            # divide by # of sequences in batch
-            sim_loss = sim_loss / b_size
-
+        #     if self.sim_loss_type == 1:  # MSE
+        #         sim_loss = (diff ** 2).sum()
+        #     else:
+        #         raise NotImplementedError
+        #
+        #     sim_loss_data = (sim_loss / b_size).data.item()  # before applying weights
+        #     # apply weights
+        #     if self.aux_loss_weight >= 0:
+        #         sim_loss = sim_loss * self.aux_loss_weight
+        #     else:
+        #         raise NotImplementedError
+        #
+        #     # divide by # of sequences in batch
+        #     sim_loss = sim_loss / b_size
+        #
         output_dict = {"loss": loss, "data": loss_data}
-
-        if self.aux_loss_code is not None:
-            output_dict["sim_loss"] = sim_loss
-            output_dict["sim_loss_data"] = sim_loss_data
+        #
+        # if self.aux_loss_code is not None:
+        #     output_dict["sim_loss"] = sim_loss
+        #     output_dict["sim_loss_data"] = sim_loss_data
 
         # return loss, loss_data, None
         return output_dict
@@ -584,6 +584,29 @@ class MSEEncoderLoss(_Loss):
             l2_loss = (torch.cat((input1_meanpool, input1_maxpool)) - torch.cat((input2_meanpool, input2_maxpool))) ** 2
             l2_loss = l2_loss.sum() * min(context1.shape[0], context1.shape[1])
             l2_loss /= 2.0
+
+        elif self.input_type == 7:  # minpool and maxpool
+            mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
+            mask2_ = mask2.permute(2, 0, 1)
+
+            masked_context1 = context1.masked_fill(mask1_, float("Inf")).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, float("Inf")).type_as(context2)
+
+            # (T, B, H) / (T, B, H)
+            input1_minpool, _ = torch.min(masked_context1, dim=0)  # (T1, B, D) --> (B, D)
+            input2_minpool, _ = torch.min(masked_context2, dim=0)  # (T2, B, D) --> (B, D)
+
+            masked_context1 = context1.masked_fill(mask1_, float("-Inf")).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, float("-Inf")).type_as(context2)
+
+            # (T, B, H)
+            input1_maxpool, _ = torch.max(masked_context1, dim=0)  # (T1, B, D) --> (B, D)
+            input2_maxpool, _ = torch.max(masked_context2, dim=0)  # (T2, B, D) --> (B, D)
+
+            l2_loss = (torch.cat((input1_minpool, input1_maxpool)) - torch.cat((input2_minpool, input2_maxpool))) ** 2
+            l2_loss = l2_loss.sum() * min(context1.shape[0], context1.shape[1])
+            l2_loss /= 2.0
+
         else:
             raise NotImplementedError
 
@@ -592,5 +615,73 @@ class MSEEncoderLoss(_Loss):
         output = defaultdict(lambda: None)
         output['loss'] = l2_loss
         output['data'] = l2_loss.item()
+
+        return output
+
+
+class CosineEncoderLoss(_Loss):
+    def __init__(self, input_type, weight=0.0):
+        super(CosineEncoderLoss, self).__init__()
+        self.input_type = input_type
+        self.weight = weight
+        self.cos_sim = nn.CosineSimilarity(dim=-1, eps=1e-6)
+
+    def forward(self, context1, context2, mask1, mask2):
+        if self.input_type == 1:    # meanpool
+            mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
+            mask2_ = mask2.permute(2, 0, 1)
+
+            masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
+
+            # (T, B, H) / (T, B, H) --> (B, H)
+            input1 = (torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)).squeeze(0)
+            input2 = (torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)).squeeze(0)
+
+            # (B, H) --> (B)
+            cos_dist = 1.0 - self.cos_sim(input1, input2)
+            # multiply by seq length to make aux. loss weight comparable
+            cos_loss = cos_dist.sum() * min(context1.shape[0], context1.shape[1])
+
+        elif self.input_type == 2:  # by position
+            # (T1, B, D) --> (min(T1, T2), B, D)
+            # (T2, B, D) --> (min(T1, T2), B, D)
+            max_len1 = context1.shape[0]
+            max_len2 = context2.shape[0]
+
+            if max_len1 > max_len2:
+                input1 = context1[:max_len2, :, :]
+                input2 = context2
+            else:
+                input1 = context1
+                input2 = context2[:max_len1, :, :]
+
+            cos_dist = 1.0 - self.cos_sim(input1, input2)
+            cos_loss = cos_dist.sum()
+
+        elif self.input_type == 3:
+            mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
+            mask2_ = mask2.permute(2, 0, 1)
+
+            masked_context1 = context1.masked_fill(mask1_, float("-Inf")).type_as(context1)
+            masked_context2 = context2.masked_fill(mask2_, float("-Inf")).type_as(context2)
+
+            # (T, B, H)
+            input1, _ = torch.max(masked_context1, dim=0)   # (T1, B, D) --> (B, D)
+            input2, _ = torch.max(masked_context2, dim=0)   # (T2, B, D) --> (B, D)
+
+            # (B, H) --> (B)
+            cos_dist = 1.0 - self.cos_sim(input1, input2)
+            # multiply by seq length to make aux. loss weight comparable
+            cos_loss = cos_dist.sum() * min(context1.shape[0], context1.shape[1])
+
+        else:
+            raise NotImplementedError
+
+        cos_loss = cos_loss * self.weight
+
+        output = defaultdict(lambda: None)
+        output['loss'] = cos_loss
+        output['data'] = cos_loss.item()
 
         return output

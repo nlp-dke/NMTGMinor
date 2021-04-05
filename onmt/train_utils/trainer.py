@@ -696,7 +696,6 @@ class XETrainer(BaseTrainer):
                             loss.backward(retain_graph=use_aux_loss)
 
                         if use_aux_loss and self.aux_loss_function:
-                            # print('===============', opt.sim_loss_update_one)
                             if opt.sim_loss_update_one is None:
                                 aux_loss_dict = self.aux_loss_function(outputs_rev['context'], outputs['context'],
                                                                        outputs_rev['src_mask'], outputs['src_mask'])

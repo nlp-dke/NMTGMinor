@@ -8,7 +8,7 @@ import torch
 import time, datetime
 from onmt.train_utils.trainer import XETrainer
 from onmt.train_utils.trainer_zoo import XEAdversarialTrainer
-from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc, MSEEncoderLoss
+from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc, MSEEncoderLoss, CosineEncoderLoss
 from onmt.model_factory import build_model, optimize_model
 from options import make_parser
 from collections import defaultdict
@@ -494,6 +494,8 @@ def main():
 
         if sim_loss_func_type == 1:
             aux_loss_function = MSEEncoderLoss(input_type=sim_loss_input_type, weight=aux_loss_weight)
+        elif sim_loss_func_type == 2:
+            aux_loss_function = CosineEncoderLoss(input_type=sim_loss_input_type, weight=aux_loss_weight)
         else:
             raise NotImplementedError
     else:
