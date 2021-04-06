@@ -9,6 +9,12 @@ It supports machine translation, speech recognition/translation.
 * [PyTorch](https://pytorch.org/) >= 1.0.1
 * [apex](https://github.com/nvidia/apex) when using half- or mixed-precision training
 
+Create virtual environment from [environment.yml](./environment.yml) by:
+
+```
+conda env create -f environment.yml
+```
+
 ----------------------------
 
 ## Credits
