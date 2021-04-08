@@ -742,8 +742,6 @@ class Transformer(NMTModel):
             self.mirror_decoder = copy.deepcopy(self.decoder)
             self.mirror_g = nn.Linear(decoder.model_size, decoder.model_size)
 
-        self.save_classifier_activation = None
-
     def reset_states(self):
         return
 
@@ -975,19 +973,6 @@ class Transformer(NMTModel):
         decoder_state = TransformerDecodingState(src, tgt_lang, encoder_output['context'], encoder_output['src_mask'],
                                                  beam_size=beam_size, model_size=self.model_size,
                                                  type=type, buffering=buffering)
-
-        if self.encoder.language_classifier and self.save_classifier_activation is not None:
-            logprobs_lan = self.generator[1](encoder_output, hidden_name='context')
-            logprobs_lan = logprobs_lan.masked_fill(encoder_output['src_mask'].permute(2, 0, 1), 0).type_as(logprobs_lan)
-
-            try:
-                saved_att = torch.load(self.save_classifier_activation)
-            except OSError:
-                saved_att = dict()
-
-            saved_att[str(len(saved_att))] = torch.exp(logprobs_lan)
-            # saved_att[str(len(saved_att))] = encoder_output['src_mask']
-            torch.save(saved_att, self.save_classifier_activation)
 
         return decoder_state
 

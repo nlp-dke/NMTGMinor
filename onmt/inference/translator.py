@@ -36,11 +36,6 @@ class Translator(object):
         else:
             self.save_activation = None
 
-        if hasattr(opt, 'save_classifier_activation'):
-            self.save_classifier_activation = opt.save_classifier_activation
-        else:
-            self.save_classifier_activation = None
-
         if self.attributes:
             self.attributes = self.attributes.split("|")
 
@@ -111,7 +106,6 @@ class Translator(object):
 
             model.encoder.save_activation = self.save_activation
             model.encoder.att_plot_path = self.att_plot_path
-            model.save_classifier_activation = self.save_classifier_activation
 
         # language model
         if opt.lm is not None:

@@ -122,12 +122,12 @@ parser.add_argument('-dynamic_max_len_scale', type=float, default=5.0,
 parser.add_argument('-dynamic_min_len_scale', type=float, default=0.0,
                     help='Using the fast decoder')
 
+# Save activation when decoding
 parser.add_argument('-att_plot_path', type=str, default=None,
                     help='If not None, save encoder att distribution from the layer where change is applied.')
 parser.add_argument('-save_activation', type=str, default=None,
                     help='If not None, save encoder att distribution from the layer where change is applied.')
-parser.add_argument('-save_classifier_activation', type=str, default=None,
-                    help='If not None, save encoder att distribution from the layer where change is applied..')
+
 
 def reportScore(name, score_total, words_total):
     print("%s AVG SCORE: %.4f, %s PPL: %.4f" % (

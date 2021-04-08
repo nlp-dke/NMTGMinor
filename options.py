@@ -258,21 +258,18 @@ def make_parser(parser):
                         help='From which epoch will the auxiliary loss start to kick in')
 
     parser.add_argument('-change_residual_at', type=int, default=None,
-                        help='Where to remove residual connections in encoder layer output. '
-                             '1 (1st)|-1 (last)|0 (all)|None')
+                        help='In which encoder layer to change residual connections.'
+                             'e.g. 1 (1st layer), -1 (last), 0 (all layers), None (do not change)')
     parser.add_argument('-change_residual', type=int, default=None,
-                        help='1: replace residual by meanpool, 2: remove residual')
+                        help='How to change the residual connections'
+                             '1: replace residual by meanpool, 2: remove residual')
 
     parser.add_argument('-change_att_query_at', type=int, default=None,
-                        help='Where to change attention query in encoder layer output. '
+                        help='In which encoder layer to change attention query in encoder layer output.'
                              '1 (1st)|-1 (last)|0 (all)|None')
     parser.add_argument('-change_att_query', type=int, default=None,
                         help='1: remove word emb, 2: remove word emb, reverse PE, 3: fully random?')
 
-    parser.add_argument('-multiway_src', action='store_true',
-                        help="""Use multiway source sentences""")
-    parser.add_argument('-multiway_src_valid', action='store_true',
-                        help="""Use multiway source sentences in dev set""")
     parser.add_argument('-language_specific_encoder', default=[], nargs='+', type=int,
                         help="Where to add language-specific adapters."
                              "1 (all layers)")
@@ -280,7 +277,7 @@ def make_parser(parser):
                         help='If positive, stochastically drop adapters')
 
     parser.add_argument('-bidirectional_translation', action='store_true',
-                        help="Whether to translate src -> tgt, tgt -> src simultaneously, given src -> tgt data")
+                        help="Whether to translate src -> tgt, tgt -> src simultaneously given src -> tgt data")
     parser.add_argument('-sim_loss_type', type=int, default=None,
                         help='Type of auxilliary loss to encourage language similarity.'
                              '1nd digit: 1 (squared error) | 2 (cosine distance)'
@@ -290,7 +287,6 @@ def make_parser(parser):
                         help='If not None, update only the src or tgt encoder.')
     parser.add_argument('-aux_loss_weight', type=float, default=0.0,
                         help='Weight for the auxiliary loss')
-
 
     parser.add_argument('-freeze_encoder', action='store_true',
                         help='Whether to freeze encoder')
@@ -304,7 +300,8 @@ def make_parser(parser):
     parser.add_argument('-language_classifier_tok', action='store_true',
                         help='Whether to use a language classifier (tok level)')
     parser.add_argument('-language_classifier_sent', action='store_true',
-                        help='Whether to use a language classifier (sent level) Not implemented yet!')
+                        help='Whether to use a language classifier (sent level)'
+                             'Not implemented yet!')
     parser.add_argument('-language_classifer_mid_layer_size', type=int, default=0,
                         help='If > 0, add aother FC layer for language classifier of this size.')
     parser.add_argument('-en_id', type=int, default=None,
@@ -319,20 +316,16 @@ def make_parser(parser):
     parser.add_argument('-num_classifier_languages', type=int, default=2,
                         help='Number of languages to classify.')
     parser.add_argument('-gradient_scale', type=float, default=1.0,
-                        help='Scale for flipped gradient')
+                        help='Scale for flipped gradient from adversarial classifier')
 
+    # Save activation
     parser.add_argument('-att_plot_path', type=str, default=None,
                         help='If not None, save encoder att distribution from the layer where change is applied.')
     parser.add_argument('-save_activation', type=str, default=None,
                         help='If not None, save encoder att distribution from the layer where change is applied.')
-    parser.add_argument('-save_classifier_activation', type=str, default=None,
-                        help='If not None, save encoder att distribution from the layer where change is applied.')
 
     parser.add_argument('-load_vocab_from_data', type=str, default=None,
-                        help="""When resuming from checkpoints, load vocab from training data instead of from previouis checkpoints.""")
-
-    parser.add_argument('-reverse_loss_landscape', action='store_true',
-                        help="Whether to reverse loss landscpe.")
+                        help="When resuming from checkpoints, load vocab from training data instead of from previous checkpoints.")
 
     return parser
 
@@ -436,12 +429,6 @@ def backward_compatible(opt):
     if not hasattr(opt, 'change_att_query'):
         opt.change_att_query = None
 
-    if not hasattr(opt, 'multiway_src'):
-        opt.multiway_src = False
-
-    if not hasattr(opt, 'multiway_src_valid'):
-        opt.multiway_src_valid = False
-
     if not hasattr(opt, 'language_classifier'):
         opt.language_classifier = False
 
@@ -480,12 +467,6 @@ def backward_compatible(opt):
 
     if not hasattr(opt, 'load_vocab_from_data'):
         opt.load_vocab_from_data = None
-
-    if not hasattr(opt, 'reverse_loss_landscape'):
-        opt.reverse_loss_landscape = False
-
-    if not hasattr(opt, 'save_classifier_activation'):
-        opt.save_classifier_activation = False
 
     if not hasattr(opt, 'adversarial_classifier'):
         opt.adversarial_classifier = False
