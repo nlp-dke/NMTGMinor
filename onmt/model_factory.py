@@ -208,7 +208,7 @@ def build_tm_model(opt, dicts):
             encoder = TransformerEncoder(opt, embedding_src, positional_encoder,
                                          opt.encoder_type, language_embeddings=language_embeddings)
         elif opt.encoder_type == "audio":
-            encoder = TransformerEncoder(opt, None, positional_encoder, opt.encoder_type)
+            encoder = TransformerEncoder(opt, None, positional_encoder, opt.encoder_type, language_embeddings=language_embeddings)
         elif opt.encoder_type == "mix":
             text_encoder = TransformerEncoder(opt, embedding_src, positional_encoder,
                                               "text", language_embeddings=language_embeddings)
