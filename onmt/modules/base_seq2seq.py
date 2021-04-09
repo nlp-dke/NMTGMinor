@@ -77,8 +77,8 @@ class NMTModel(nn.Module):
             #         return False
             if param_name == 'decoder.mask':
                 return False
-            # if 'generator.1' in param_name:  #TODO: need to when training classifier
-            #     return False
+            if 'generator.1' in param_name:  # Not loading a previously trained classifier!
+                return False
             print('*** Loading parameter', param_name)
             return True
 
