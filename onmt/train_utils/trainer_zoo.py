@@ -55,7 +55,7 @@ class XEAdversarialTrainer(XETrainer):
 
             # Optimizer for classifier
             self.optim2 = onmt.Optim(opt)
-            self.optim2.lr = 0.001
+            self.optim2.lr = 0.01
             self.optim2.update_method = 'regular'
             self.optim2.set_parameters(self.model.parameters()) #generator[1].parameters())
             for p in self.optim2.params:
