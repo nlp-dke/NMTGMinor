@@ -475,7 +475,7 @@ class MSEEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H)
+            # (1, B, H) / (B, 1) --> (1, B, H)
             input1 = torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)
             input2 = torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)
 
@@ -541,7 +541,6 @@ class MSEEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H)
             input1 = torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)
             input2 = torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)
 
@@ -570,7 +569,6 @@ class MSEEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H)
             input1_meanpool = (torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)).squeeze()
             input2_meanpool = (torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)).squeeze()
 
@@ -634,7 +632,7 @@ class CosineEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H) --> (B, H)
+            # (1, B, H) / (B, 1) --> (1, B, H) --> (B, H)
             input1 = (torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)).squeeze(0)
             input2 = (torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)).squeeze(0)
 
