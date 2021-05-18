@@ -49,11 +49,12 @@ bash ./recipes/zero-shot/pred.sh $PATH
 ```
 Here $PATH contains the trained model.
 
-## Dataset
+## Data
+Our experiments are run on three datasets: IWSLT 2017, Europarl, PMIndia.
+
 ### IWSLT
 
-The training set is a subset of the TED task from IWSLT 2017.
-Provided from the MMCR4NLP corpus described in https://arxiv.org/pdf/1710.01025.pdf.
+The training set is a subset of the TED task from IWSLT 2017 compiled in the MMCR4NLP dataset (https://arxiv.org/pdf/1710.01025.pdf).
 
 We use the dev set from multilingual TED task from IWSLT 2017 (dev2010).
 https://wit3.fbk.eu/2017-01
@@ -61,10 +62,50 @@ https://wit3.fbk.eu/2017-01
 The test set is the official test set (tst2017) for the multilingual TED task from IWSLT 2017.
 https://wit3.fbk.eu/2017-01-b
 
+```
+@inproceedings{cettolo2017overview,
+	title={Overview of the iwslt 2017 evaluation campaign},
+	author={Cettolo, Mauro and Federico, Marcello and Bentivogli, Luisa and Jan, Niehues and Sebastian, St{\"u}ker and Katsuitho, Sudoh and Koichiro, Yoshino and Christian, Federmann},
+	booktitle={International Workshop on Spoken Language Translation},
+	pages={2--14},
+	year={2017}
+}
+
+@misc{dabre2017mmcr4nlp,
+	title={{MMCR4NLP}: Multilingual Multiway Corpora Repository for Natural Language Processing},
+	author={Raj Dabre and Sadao Kurohashi},
+	year={2017},
+	eprint={1710.01025},
+	archivePrefix={arXiv},
+	primaryClass={cs.CL}
+}
+```
+
 ### Europarl
 
-The training, dev, and test set come from a subset of the TED task from Europarl.
-Provided from the MMCR4NLP corpus described in https://arxiv.org/pdf/1710.01025.pdf.
+The training, dev, and test sets come from a subset of the Europarl corpus complied in the MMCR4NLP dataset (https://arxiv.org/pdf/1710.01025.pdf).
+
+```
+@inproceedings{koehn2005europarl,
+  title={Europarl: A parallel corpus for statistical machine translation},
+  author={Koehn, Philipp},
+  booktitle={MT summit},
+  volume={5},
+  pages={79--86},
+  year={2005},
+  url = "http://homepages.inf.ed.ac.uk/pkoehn/publications/europarl-mtsummit05.pdf",
+  organization={Citeseer}
+}
+
+@misc{dabre2017mmcr4nlp,
+	title={{MMCR4NLP}: Multilingual Multiway Corpora Repository for Natural Language Processing},
+	author={Raj Dabre and Sadao Kurohashi},
+	year={2017},
+	eprint={1710.01025},
+	archivePrefix={arXiv},
+	primaryClass={cs.CL}
+}
+```
 
 ### PMIndia
 
@@ -74,8 +115,18 @@ After deduplicating, we first take a multiway subset of all languages, using Eng
 This results in 1695 sentences in the dev and test respectively.
 In this process, we excluded Assamese  (as),  Maithili  (mni),  Urdu  (ur). 
 As these languages had very little data, including them would make the multiway subset too small. 
-We upload the dev and test sets [here]().
 
+We upload our train/dev/test splits [here](https://drive.google.com/drive/folders/1lxmqn_vJ4BDLjbtmKDHpF5gHxfDW33eW?usp=sharing).
+
+```
+@article{haddow2020pmindia,
+	title={{PMIndia}--A Collection of Parallel Corpora of Languages of {India}},
+	author={Haddow, Barry and Kirefu, Faheem},
+	url = "https://arxiv.org/abs/2001.09907",
+	journal={arXiv preprint arXiv:2001.09907},
+	year={2020}
+}
+```
 
 ## Experiment and Results
 ### Computation Infrastructure
