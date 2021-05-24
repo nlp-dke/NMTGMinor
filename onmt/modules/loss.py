@@ -475,7 +475,7 @@ class MSEEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H)
+            # (1, B, H) / (B, 1) --> (1, B, H)
             input1 = torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)
             input2 = torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)
 
@@ -499,7 +499,7 @@ class MSEEncoderLoss(_Loss):
             l2_loss = (input1 - input2) ** 2
             l2_loss = l2_loss.sum()
 
-        elif self.input_type == 3:
+        elif self.input_type == 3:  # maxpool
             mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
             mask2_ = mask2.permute(2, 0, 1)
 
@@ -514,25 +514,25 @@ class MSEEncoderLoss(_Loss):
             # multiply by seq length to make aux. loss weight comparable
             l2_loss = l2_loss.sum() * min(context1.shape[0], context1.shape[1])
 
-        elif self.input_type == 4:
+        # elif self.input_type == 4:
             # (T1, B, D) --> (T1, B, D'). Start with D'= D/2
             # (T2, B, D) --> (T2, B, D')
             # (T1, B, D) --> (min(T1, T2), B, D)
             # (T2, B, D) --> (min(T1, T2), B, D)
-            max_len1 = context1.shape[0]
-            max_len2 = context2.shape[0]
-            lan_inv_emb_dim = context1.shape[2] // 2
-
-            if max_len1 > max_len2:
-                input1 = context1[:max_len2, :, :lan_inv_emb_dim]
-                input2 = context2[:, :, :lan_inv_emb_dim]
-            else:
-                input1 = context1[:, :, :lan_inv_emb_dim]
-                input2 = context2[:max_len1, :, :lan_inv_emb_dim]
-
-            l2_loss = (input1 - input2) ** 2
-            # multiply by seq length to make aux. loss weight comparable
-            l2_loss = l2_loss.sum() * 2
+            # max_len1 = context1.shape[0]
+            # max_len2 = context2.shape[0]
+            # lan_inv_emb_dim = context1.shape[2] // 2
+            #
+            # if max_len1 > max_len2:
+            #     input1 = context1[:max_len2, :, :lan_inv_emb_dim]
+            #     input2 = context2[:, :, :lan_inv_emb_dim]
+            # else:
+            #     input1 = context1[:, :, :lan_inv_emb_dim]
+            #     input2 = context2[:max_len1, :, :lan_inv_emb_dim]
+            #
+            # l2_loss = (input1 - input2) ** 2
+            # # multiply by seq length to make aux. loss weight comparable
+            # l2_loss = l2_loss.sum() * 2
 
         elif self.input_type == 5:      # meanpool + position by position
             mask1_ = mask1.permute(2, 0, 1)  # B, H, T --> T, B, H
@@ -541,7 +541,6 @@ class MSEEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H)
             input1 = torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)
             input2 = torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)
 
@@ -570,7 +569,6 @@ class MSEEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H)
             input1_meanpool = (torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)).squeeze()
             input2_meanpool = (torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)).squeeze()
 
@@ -634,7 +632,7 @@ class CosineEncoderLoss(_Loss):
             masked_context1 = context1.masked_fill(mask1_, 0).type_as(context1)
             masked_context2 = context2.masked_fill(mask2_, 0).type_as(context2)
 
-            # (T, B, H) / (T, B, H) --> (B, H)
+            # (1, B, H) / (B, 1) --> (1, B, H) --> (B, H)
             input1 = (torch.sum(masked_context1, dim=0, keepdim=True) / (1 - mask1_.float()).sum(dim=0)).squeeze(0)
             input2 = (torch.sum(masked_context2, dim=0, keepdim=True) / (1 - mask2_.float()).sum(dim=0)).squeeze(0)
 

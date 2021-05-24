@@ -201,7 +201,6 @@ def main():
                 data_type = 'text'
 
             if not opt.streaming:
-                print('________________________________', opt.en_id)
                 train_data = onmt.Dataset(train_src,
                                           train_tgt,
                                           train_src_sizes, train_tgt_sizes,
@@ -291,7 +290,7 @@ def main():
         dicts = torch.load(opt.data + ".dict.pt")
 
         root_dir = os.path.dirname(opt.data)
-
+        print(dicts['langs'])
         print("Loading training data ...")
 
         train_dirs, valid_dirs = dict(), dict()
@@ -358,7 +357,8 @@ def main():
                                               num_split=len(opt.gpus),
                                               token_level_lang=opt.language_classifier_tok,
                                               bidirectional=opt.bidirectional_translation,
-                                              multidataset=True)
+                                              multidataset=True,
+                                              en_id=opt.en_id)
 
                     train_sets.append(train_data)
 
@@ -411,7 +411,8 @@ def main():
                                               num_split=len(opt.gpus),
                                               token_level_lang=opt.language_classifier_tok,
                                               bidirectional=opt.bidirectional_translation,
-                                              multidataset=True)
+                                              multidataset=True,
+                                              en_id=opt.en_id)
 
                     valid_sets.append(valid_data)
 
