@@ -167,9 +167,8 @@ def collect_fn(src_data, tgt_data,
 
             # Convert labels to en vs non-en
             if en_id:
-                out_tensor[out_tensor == en_id] = 1
-                torch.logical_and(out_tensor != en_id, out_tensor != onmt.constants.PAD)
-                out_tensor[torch.logical_and(out_tensor != en_id, out_tensor != onmt.constants.PAD)] = 2
+                out_tensor[out_tensor == en_id] = 1 # English between 1
+                out_tensor[torch.logical_and(out_tensor != 1, out_tensor != onmt.constants.PAD)] = 2
             tensors['targets_source_lang'] = out_tensor
 
     if tgt_lang_data is not None:

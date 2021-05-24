@@ -468,8 +468,9 @@ class XETrainer(BaseTrainer):
                     loss_dict = self.loss_function(outputs_rev, targets, model=self.model)
                     loss_data = loss_dict['data']
                     total_loss += loss_data
-                    total_words += batch.tgt_size
-                    total_src_words += batch.src_size
+                    # flipped since src and tgt are now flipped
+                    total_words += batch.src_size
+                    total_src_words += batch.tgt_size
 
                 # adv loss
                 if opt.language_classifier and opt.language_classifier_tok:
@@ -610,6 +611,7 @@ class XETrainer(BaseTrainer):
         total_non_pads = 0
         report_loss, report_tgt_words = 0, 0
         report_classifier_loss, report_classifier_loss_rev = 0.0, 0.0
+        report_aux_loss = 0.0
         report_src_words = 0
         start = time.time()
         n_samples = len(train_data)
@@ -707,7 +709,7 @@ class XETrainer(BaseTrainer):
                                                                        outputs_rev['src_mask'], outputs['src_mask'])
                             else:
                                 raise NotImplementedError()
-                            aux_loss_data = aux_loss_dict['data']
+                            report_aux_loss += aux_loss_dict['data']
                             loss = aux_loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
 
                             if self.cuda:
@@ -874,12 +876,15 @@ class XETrainer(BaseTrainer):
                            report_src_words / (time.time() - start),
                            report_tgt_words / (time.time() - start),
                            str(datetime.timedelta(seconds=int(time.time() - self.start_time)))))
+
                     if epoch >= self.opt.aux_loss_start_from:
-                        print('********* Aux loss', aux_loss_data / report_src_words)
+                        print('********* Aux loss (after weight)', report_aux_loss / report_src_words)
+                        print('********* Aux loss (original)', report_aux_loss / report_src_words / self.aux_loss_function.weight)
 
                     report_loss, report_tgt_words = 0, 0
                     report_classifier_loss = 0.0
                     report_src_words = 0
+                    report_aux_loss = 0.0
                     start = time.time()
 
                 i = i + 1
