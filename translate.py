@@ -124,9 +124,9 @@ parser.add_argument('-dynamic_min_len_scale', type=float, default=0.0,
 
 # Save activation when decoding
 parser.add_argument('-att_plot_path', type=str, default=None,
-                    help='If not None, save encoder att distribution from the layer where change is applied.')
+                    help='If not None, save encoder att distribution.')
 parser.add_argument('-save_activation', type=str, default=None,
-                    help='If not None, save encoder att distribution from the layer where change is applied.')
+                    help='If not None, save encoder output.')
 
 
 def reportScore(name, score_total, words_total):
