@@ -79,7 +79,7 @@ class NMTModel(nn.Module):
                 return False
             if 'generator.1' in param_name:  # Not loading a previously trained classifier!
                 return False
-            print('*** Loading parameter', param_name)
+            # print('*** Loading parameter', param_name)
             return True
 
         # restore old generated if necessary for loading

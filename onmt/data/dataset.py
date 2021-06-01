@@ -165,10 +165,12 @@ def collect_fn(src_data, tgt_data,
                 out_tensor[:(src_lengths[i]), i] = v + 1
             # print('PREDICTION SHAPE, before', out_tensor)
 
-            # Convert labels to en vs non-en
+            # Convert labels to two classes e.g. en vs non-en
             if en_id:
-                out_tensor[out_tensor == en_id] = 1 # English between 1
-                out_tensor[torch.logical_and(out_tensor != 1, out_tensor != onmt.constants.PAD)] = 2
+                en_idx = out_tensor != en_id
+                out_tensor[en_idx] = 1  # English has label 1
+                out_tensor[torch.logical_and(~en_idx, out_tensor != onmt.constants.PAD)] = 2    # non-English has label 2
+
             tensors['targets_source_lang'] = out_tensor
 
     if tgt_lang_data is not None:
@@ -185,6 +187,12 @@ def collect_fn(src_data, tgt_data,
             for i, v in enumerate(sl_):
                 # lan ID starts with 0, but pred label values should start with 1 (due to padding)
                 out_tensor[:(src_lengths[i]), i] = v + 1
+
+            # Convert labels to two classes e.g. en vs non-en
+            if en_id:
+                en_idx = out_tensor != en_id
+                out_tensor[en_idx] = 1  # English has label 1
+                out_tensor[torch.logical_and(~en_idx, out_tensor != onmt.constants.PAD)] = 2    # non-English has label 2
 
             tensors['targets_target_lang'] = out_tensor
 

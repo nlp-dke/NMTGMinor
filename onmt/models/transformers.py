@@ -286,6 +286,7 @@ class TransformerEncoder(nn.Module):
                                  change_residual=change_residual,
                                  change_att_query=change_att_query,
                                  add_adapter=add_adapter,
+                                 residual_death_rate=(_l + 1.0) / self.layers * 0.5,
                                  opt=opt)
 
             self.layer_modules.append(block)
@@ -386,14 +387,20 @@ class TransformerEncoder(nn.Module):
             context = layer(context, mask_src, given_query=given_query, att_plot_path=self.att_plot_path,
                             src_lang=input_lang)   # batch_size x len_src x d_model
 
+            # If save_activation is not none and we're at last encoder layer
             if self.save_activation is not None and (i == len(self.layer_modules) - 1):
+                # Zero-pad layer output
                 padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
                 try:
+                    # Load existing file
                     saved_att = torch.load(self.save_activation)
                 except OSError:
+                    # In case no file exists, init dictionary
+                    # where key=layer_idx, value=list of activations where each element is a minibatch of activations
                     saved_att = defaultdict(list)
 
                 saved_att[i].append(padded_context)
+                # Save to path in self.save_activation
                 torch.save(saved_att, self.save_activation)
 
             if self.token_classifier_at is not None and self.token_classifier_at == i+1:
@@ -408,14 +415,21 @@ class TransformerEncoder(nn.Module):
         if self.add_adapter:
             context = self.adapters(context, input_lang)
 
+        # Save final encoder output (after layer norm)
         if self.save_activation is not None:
+            # Zero-pad layer output
             padded_context = context.masked_fill(mask_src.permute(2, 0, 1), 0).type_as(context)
             try:
+                # Load existing file
                 saved_att = torch.load(self.save_activation + '.norm')
             except OSError:
+                # In case no file exists, init dictionary
+                # where key=layer_idx, value=list of activations where each element is a minibatch of activations
                 saved_att = defaultdict(list)
+            # key=-1 to symbolize last encoder output (after layer norm)
             saved_att[-1].append(padded_context)
             torch.save(saved_att, self.save_activation + '.norm')
+
         output_dict['context'] = context
         output_dict['src_mask'] = mask_src
         # {'context': context, 'src_mask': mask_src}

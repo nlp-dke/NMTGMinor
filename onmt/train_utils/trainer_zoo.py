@@ -51,7 +51,7 @@ class XEAdversarialTrainer(XETrainer):
             self.optim = onmt.Optim(opt)
             self.optim.set_parameters(self.model.parameters())
             for p in self.optim.params:
-                print('OPTIM1========================', p.shape)
+                print('*** Optim1 shape:', p.shape)
 
             # Optimizer for classifier
             self.optim2 = onmt.Optim(opt)
@@ -59,7 +59,7 @@ class XEAdversarialTrainer(XETrainer):
             self.optim2.update_method = 'regular'
             self.optim2.set_parameters(self.model.parameters()) #generator[1].parameters())
             for p in self.optim2.params:
-                print('OPTIM2========================', p.shape)
+                print('*** Optim2 shape:', p.shape)
 
             if not self.opt.fp16:
                 opt_level = "O0"
@@ -73,7 +73,6 @@ class XEAdversarialTrainer(XETrainer):
 
             if self.cuda:
                 # Documentation for num_losses comes from https://github.com/NVIDIA/apex/tree/master/examples/dcgan
-                # model.generator[1]
                 [self.model, _], [self.optim.optimizer, self.optim2.optimizer] = amp.initialize([self.model, self.model],
                                                                                                 [self.optim.optimizer, self.optim2.optimizer],
                                                                                                 opt_level=opt_level,
