@@ -262,7 +262,7 @@ def make_parser(parser):
                              'e.g. 1 (1st layer), -1 (last), 0 (all layers), None (do not change)')
     parser.add_argument('-change_residual', type=int, default=None,
                         help='How to change the residual connections'
-                             '1: replace residual by meanpool, 2: remove residual')
+                             '1: replace residual by meanpool, 2: remove residual, 3: random drop residual')
 
     parser.add_argument('-change_att_query_at', type=int, default=None,
                         help='In which encoder layer to change attention query in encoder layer output.'

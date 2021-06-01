@@ -26,7 +26,7 @@ class PrePostProcessing(nn.Module):
             a = adding previous input to output (residual)
     """
     
-    def __init__(self, d_model, dropout_p, sequence='nda', variational=False, elementwise_affine=True):
+    def __init__(self, d_model, dropout_p, sequence='nda', variational=False, elementwise_affine=True, death_rate=0.0):
         super(PrePostProcessing, self).__init__() 
         self.d_model = d_model
         self.dropout_p = dropout_p     
@@ -46,6 +46,8 @@ class PrePostProcessing(nn.Module):
                 self.dropout = VariationalDropout(self.dropout_p, batch_first=False)
             else:
                 self.dropout = nn.Dropout(self.dropout_p)
+
+        self.death_rate = death_rate
     
     def forward(self, tensor, input_tensor=None, mask=None):
 
@@ -78,6 +80,34 @@ class PrePostProcessing(nn.Module):
                         output = output + meanpool_tensor
                     else:
                         output = F.relu(self.k) * output + meanpool_tensor
+
+            if step == 's':
+                # stochastically drop residual by (layer_idx)/total_layers chance
+                # bottom layer --> 0; top layer --> 1 - (1-total_layers)/total_layers
+                if input_tensor is not None:
+                    coin = True     # if coin is True, keep residual layer
+                    if self.training:
+                        coin = (torch.rand(1)[0].item() >= self.death_rate)
+
+                    if self.training:
+                        if self.death_rate == 1:
+                            scaling_factor = 0
+                        else:
+                            scaling_factor = 1.0 / (1 - self.death_rate)
+                    else:
+                        scaling_factor = 1.0
+
+                    if onmt.constants.residual_type != 'gated':
+                        if coin:
+                            output = output + input_tensor * scaling_factor
+                        else:
+                            output = output + input_tensor - input_tensor
+                    else:
+                        if coin:
+                            output = F.relu(self.k) * output + input_tensor * scaling_factor
+                        else:
+                            output = F.relu(self.k) * output + input_tensor - input_tensor
+
         return output
 
 
@@ -105,7 +135,7 @@ class EncoderLayer(nn.Module):
     """
     
     def __init__(self, h, d_model, p, d_ff, attn_p=0.1, variational=False, death_rate=0.0,
-                 change_residual=None, change_att_query=None, add_adapter=False, opt=None, **kwargs):
+                 change_residual=None, change_att_query=None, add_adapter=False, opt=None, residual_death_rate=0.0, **kwargs):
         super(EncoderLayer, self).__init__()
         self.variational = variational
         self.death_rate = death_rate
@@ -117,6 +147,8 @@ class EncoderLayer(nn.Module):
                 att_postpro_type = 'dm'  # dropout, no normal residual, use meanpool instead
             elif change_residual == 2:
                 att_postpro_type = 'db'  # only dropout
+            elif change_residual == 3:
+                att_postpro_type = 'ds'    # stochastically drop residual
             else:
                 raise NotImplementedError
 
@@ -127,7 +159,8 @@ class EncoderLayer(nn.Module):
             ff_dict = {}
 
         self.preprocess_attn = PrePostProcessing(d_model, p, sequence='n')
-        self.postprocess_attn = PrePostProcessing(d_model, p, sequence=att_postpro_type, variational=self.variational)
+        self.postprocess_attn = PrePostProcessing(d_model, p, sequence=att_postpro_type, variational=self.variational,
+                                                  death_rate=residual_death_rate)
         self.preprocess_ffn = PrePostProcessing(d_model, p, sequence='n')
         self.postprocess_ffn = PrePostProcessing(d_model, p, sequence='da', variational=self.variational)
         self.multihead = MultiHeadAttention(h, d_model, attn_p=attn_p, share=2)
