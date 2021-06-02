@@ -1,6 +1,22 @@
 # Improving Zero-Shot Translation by Disentangling Positional Information
 
 ## Software
+
+First off: This repository is based on [NMTGMinor](https://github.com/quanpn90/NMTGMinor). 
+Please see [here](https://github.com/quanpn90/NMTGMinor) for its main contributors.
+
+Create virtual environment from [environment.yml](../../environment.yml) by:
+
+```
+conda env create -f environment.yml
+```
+
+Clone this repo and switch to the branch `sim`.
+```
+git clone https://github.com/nlp-dke/NMTGMinor.git
+git checkout sim
+```
+
 ### Dependency
 For training:
 * Python version >= 3.7 (most recommended)
@@ -142,7 +158,7 @@ where we also include the zero-shot directions in dev set for early stopping.
 | Dataset                           | # sentences | Layers | Average Time Per Epoch |
 |-----------------------------------|--------|--------|-----------------------| 
 | IWSLT                             | 870K | 5 | 7 min   |
-| Europarl (non-overlap / multiday) | 2M   | 8 | 45 min  |
+| Europarl (non-overlap / multiway) | 2M   | 8 | 45 min  |
 | Europarl (full)                   | 17M  | 8 | 7 hr    |
 | PMIndia                           | 639K | 5 | 9 min   |
 
@@ -158,8 +174,13 @@ The final parameter count is therefore also different.
 
 ### Validation and Test Performance
 
+We use `BLEU+case.mixed+numrefs.1+smooth.exp+tok.13a+version.1.4.12` by default. 
+
+On the PMIndia dataset, we use the SPM tokenizer (`tok.spm` instead of `tok.13a`) for better tokenization of the Indic languages.
+At the time of publication, the argument `tok.spm` is only available as a pull request to [sacreBLEU](https://github.com/mjpost/sacrebleu/pull/118). We applied the pull request locally to use the SPM tokenizer.
+
 The average BLEU scores on the supervised directions are reported below 
-in the format of: dev / test.
+in the format of: `dev / test`.
 
 | Dataset   | Baseline | Residual | Residual + Query |
 |-----------|----------|----------|---------|
