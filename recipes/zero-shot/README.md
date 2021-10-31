@@ -68,7 +68,20 @@ Here $PATH contains the trained model.
 ## Data
 Our experiments are run on three datasets: IWSLT 2017, Europarl, PMIndia.
 
-### IWSLT
+### Download Preprossed Data
+Below are links to download the preprocessed data. 
+
+**Please note: The target files start with language tags, since we do not specifically add BOS tokens again. If your implementation automatically append language/BOS tags to target sentences, please make sure to remove the tags in the target files.**
+
+* IWSLT: [OSF download](https://osf.io/5xgbf), [Google drive download](https://drive.google.com/file/d/1RsmTye2nrPkWir6hADthXhqirxtUiP5A/view?usp=sharing)
+* PMIndia: [OSF download](https://osf.io/ydq5b), [Google drive download](https://drive.google.com/file/d/1D6QJHreZeDXrj5edzXGrgyAAhje1h_30/view?usp=sharing)
+* Europarl-non-overlap: [Google drive download](https://drive.google.com/file/d/1HprbiBa-9OVzA3obAq7WXvcWHJG4L2PF/view?usp=sharing)
+* Europarl-multiway: [Google drive download](https://drive.google.com/file/d/1BcuBJQADF7MhVKw8r595wxWauf2ZmRHv/view?usp=sharing)
+* Europarl-full: [Google drive download](https://drive.google.com/file/d/1stzyb-EzIBsLT45oWlpRXPp9deehnSM5/view?usp=sharing)
+
+### Dataset Description
+
+#### IWSLT
 
 The training set is a subset of the TED task from IWSLT 2017 compiled in the MMCR4NLP dataset (https://arxiv.org/pdf/1710.01025.pdf).
 
@@ -78,52 +91,12 @@ https://wit3.fbk.eu/2017-01
 The test set is the official test set (tst2017) for the multilingual TED task from IWSLT 2017.
 https://wit3.fbk.eu/2017-01-b
 
-```
-@inproceedings{cettolo2017overview,
-	title={Overview of the iwslt 2017 evaluation campaign},
-	author={Cettolo, Mauro and Federico, Marcello and Bentivogli, Luisa and Jan, Niehues and Sebastian, St{\"u}ker and Katsuitho, Sudoh and Koichiro, Yoshino and Christian, Federmann},
-	booktitle={International Workshop on Spoken Language Translation},
-	pages={2--14},
-	year={2017}
-}
 
-@misc{dabre2017mmcr4nlp,
-	title={{MMCR4NLP}: Multilingual Multiway Corpora Repository for Natural Language Processing},
-	author={Raj Dabre and Sadao Kurohashi},
-	year={2017},
-	eprint={1710.01025},
-	archivePrefix={arXiv},
-	primaryClass={cs.CL}
-}
-```
-
-### Europarl
+#### Europarl
 
 The training, dev, and test sets come from a subset of the Europarl corpus complied in the MMCR4NLP dataset (https://arxiv.org/pdf/1710.01025.pdf).
 
-```
-@inproceedings{koehn2005europarl,
-  title={Europarl: A parallel corpus for statistical machine translation},
-  author={Koehn, Philipp},
-  booktitle={MT summit},
-  volume={5},
-  pages={79--86},
-  year={2005},
-  url = "http://homepages.inf.ed.ac.uk/pkoehn/publications/europarl-mtsummit05.pdf",
-  organization={Citeseer}
-}
-
-@misc{dabre2017mmcr4nlp,
-	title={{MMCR4NLP}: Multilingual Multiway Corpora Repository for Natural Language Processing},
-	author={Raj Dabre and Sadao Kurohashi},
-	year={2017},
-	eprint={1710.01025},
-	archivePrefix={arXiv},
-	primaryClass={cs.CL}
-}
-```
-
-### PMIndia
+#### PMIndia
 
 As the corpus (http://data.statmt.org/pmindia/) did not specify paritions of the train / dev / test sets, 
 we partition the corpus ourselves.
@@ -134,15 +107,6 @@ As these languages had very little data, including them would make the multiway 
 
 We upload our train/dev/test splits [here](https://drive.google.com/drive/folders/1lxmqn_vJ4BDLjbtmKDHpF5gHxfDW33eW?usp=sharing).
 
-```
-@article{haddow2020pmindia,
-	title={{PMIndia}--A Collection of Parallel Corpora of Languages of {India}},
-	author={Haddow, Barry and Kirefu, Faheem},
-	url = "https://arxiv.org/abs/2001.09907",
-	journal={arXiv preprint arXiv:2001.09907},
-	year={2020}
-}
-```
 
 ## Experiment and Results
 ### Computation Infrastructure
@@ -177,7 +141,7 @@ The final parameter count is therefore also different.
 We use `BLEU+case.mixed+numrefs.1+smooth.exp+tok.13a+version.1.4.12` by default. 
 
 On the PMIndia dataset, we use the SPM tokenizer (`tok.spm` instead of `tok.13a`) for better tokenization of the Indic languages.
-At the time of publication, the argument `tok.spm` is only available as a pull request to [sacreBLEU](https://github.com/mjpost/sacrebleu/pull/118). We applied the pull request locally to use the SPM tokenizer.
+At the time of publication, the argument `tok.spm` is only available as a [pull request to sacreBLEU](https://github.com/mjpost/sacrebleu/pull/118). We applied the pull request locally to use the SPM tokenizer.
 
 The average BLEU scores on the supervised directions are reported below 
 in the format of: `dev / test`.
