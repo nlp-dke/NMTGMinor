@@ -79,6 +79,12 @@ Below are links to download the preprocessed data.
 * Europarl-multiway: [Google drive download](https://drive.google.com/file/d/1BcuBJQADF7MhVKw8r595wxWauf2ZmRHv/view?usp=sharing)
 * Europarl-full: [Google drive download](https://drive.google.com/file/d/1stzyb-EzIBsLT45oWlpRXPp9deehnSM5/view?usp=sharing)
 
+To download with command line one could use `gdown`, e.g.:
+```
+# PMIndia
+gdown https://drive.google.com/uc?id=1D6QJHreZeDXrj5edzXGrgyAAhje1h_30
+```
+
 ### Dataset Description
 
 #### IWSLT
