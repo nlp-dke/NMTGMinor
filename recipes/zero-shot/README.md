@@ -156,7 +156,7 @@ in the format of: `dev / test`.
 
 | Dataset   | Baseline | Residual | Residual + Query |
 |-----------|----------|----------|---------|
-| IWSLT                  | 27.6 / 29.8 [model](https://drive.google.com/file/d/137YjxsZo5a1LGAfdzwjw8vbEokTc05N0/view?usp=sharing) | 27.2 / 29.4 [model](https://drive.google.com/file/d/1oeAfWg4yddNBuDJ8G7oD4p-TsYtxpGo0/view?usp=sharing) | 27.4 / 29.4 |
+| IWSLT                  | 27.6 / 29.8 ([model])(https://drive.google.com/file/d/137YjxsZo5a1LGAfdzwjw8vbEokTc05N0/view?usp=sharing) | 27.2 / 29.4 ([model])(https://drive.google.com/file/d/1oeAfWg4yddNBuDJ8G7oD4p-TsYtxpGo0/view?usp=sharing) | 27.4 / 29.4 |
 | Europarl, multiway     | 34.6 / 34.2 | 34.2 / 33.9 | 34.8 / 33.1 |
 | Europarl, non-overlap  | 36.0 / 35.6 | 35.7 / 35.4 | 35.3 / 34.9 |
 | Europarl, full         | 35.9 / 35.4 | 35.6 / 36.4 | 36.0 / 35.9 |
