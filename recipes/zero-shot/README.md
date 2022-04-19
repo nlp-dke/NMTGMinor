@@ -61,9 +61,10 @@ bash ./recipes/zero-shot/train.remove.residual.query.sh
 
 ### Test
 ```
-bash ./recipes/zero-shot/pred.sh $PATH
+# Example with iwslt:
+bash ./recipes/zero-shot/pred.iwlst.sh $MODEL_NAME 
 ```
-Here $PATH contains the trained model.
+`$MODEL_NAME` is directory name containing the trained model (`model.pt`).
 
 ## Data
 Our experiments are run on three datasets: IWSLT 2017, Europarl, PMIndia.
