@@ -1,5 +1,5 @@
 #!/bin/bash
-source ./recipe/zero-shot/config.sh
+source ./recipes/zero-shot/config.sh
 set -eu
 
 

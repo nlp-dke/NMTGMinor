@@ -62,7 +62,7 @@ bash ./recipes/zero-shot/train.remove.residual.query.sh
 ### Test
 ```
 # Example with iwslt:
-bash ./recipes/zero-shot/pred.iwlst.sh $MODEL_NAME 
+bash ./recipes/zero-shot/pred.iwslt.sh $MODEL_NAME 
 ```
 `$MODEL_NAME` is directory name containing the trained model (`model.pt`).
 
