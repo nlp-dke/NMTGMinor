@@ -107,7 +107,7 @@ if [ -z "$DEATH" ]; then
     DEATH=0.0
 fi
 
-python3 -u $NMTDIR/train.py  -data $BASEDIR/model/${name}/train -data_format bin \
+python3 -u $NMTDIR/train.py  -data $BASEDIR/model/${name}/train \
        -save_model $BASEDIR/model/${name}/checkpoints/model \
        -model $TRANSFORMER \
        -batch_size_words $BATCH_SIZE \
