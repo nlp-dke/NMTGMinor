@@ -99,6 +99,22 @@ if [ "$LAN_EMB_CONCAT" == true ]; then
     magic_str=$magic_str" -language_embedding_type concat"
 fi
 
+if [ ! -z "$RESIDUAL_AT" ]; then
+    magic_str=$magic_str" -change_residual_at $RESIDUAL_AT"
+fi
+
+if [ ! -z "$RESIDUAL" ]; then
+    magic_str=$magic_str" -change_residual $RESIDUAL"
+fi
+
+if [ ! -z "$QUERY_AT" ]; then
+    magic_str=$magic_str" -change_att_query_at $QUERY_AT"
+fi
+
+if [ ! -z "$QUERY" ]; then
+    magic_str=$magic_str" -change_att_query $QUERY"
+fi
+
 if [ -z "$SEED" ]; then
     SEED=8877
 fi
