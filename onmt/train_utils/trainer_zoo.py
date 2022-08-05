@@ -24,21 +24,7 @@ from onmt.train_utils.stats import Logger
 from onmt.utils import checkpoint_paths, normalize_gradients
 
 import sys
-
-
-def generate_data_iterator(dataset, seed, num_workers=1, epoch=1., buffer_size=0):
-
-    # check if dataset is a list:
-    if isinstance(dataset, list):
-        # this is a multidataset
-        data_iterator = MultiDataIterator(dataset, seed=seed, num_workers=num_workers,
-                                          epoch=epoch, buffer_size=buffer_size)
-    else:
-
-        data_iterator = DataIterator(dataset, dataset.collater, dataset.batches, seed=seed,
-                                     num_workers=num_workers, epoch=epoch, buffer_size=buffer_size)
-
-    return data_iterator
+from onmt.train_utils.trainer import generate_data_iterator
 
 
 class XEAdversarialTrainer(XETrainer):
@@ -49,7 +35,14 @@ class XEAdversarialTrainer(XETrainer):
         if setup_optimizer:     # Set up optimizer for the classifier!
             # Normal optimzer for MT
             self.optim = onmt.Optim(opt)
-            self.optim.set_parameters(self.model.parameters())
+
+            # main params exclude the classifier
+            main_params = []
+            for n, W in self.model.named_parameters():
+                if "generator.1" not in n:
+                    main_params.append(W)
+
+            self.optim.set_parameters(main_params)
             for p in self.optim.params:
                 print('*** Optim1 shape:', p.shape)
 
@@ -57,7 +50,7 @@ class XEAdversarialTrainer(XETrainer):
             self.optim2 = onmt.Optim(opt)
             self.optim2.lr = 0.01
             self.optim2.update_method = 'regular'
-            self.optim2.set_parameters(self.model.parameters()) #generator[1].parameters())
+            self.optim2.set_parameters(self.model.generator[1].parameters())
             for p in self.optim2.params:
                 print('*** Optim2 shape:', p.shape)
 
@@ -73,7 +66,7 @@ class XEAdversarialTrainer(XETrainer):
 
             if self.cuda:
                 # Documentation for num_losses comes from https://github.com/NVIDIA/apex/tree/master/examples/dcgan
-                [self.model, _], [self.optim.optimizer, self.optim2.optimizer] = amp.initialize([self.model, self.model],
+                [self.model, self.model.generator[1]], [self.optim.optimizer, self.optim2.optimizer] = amp.initialize([self.model, self.model.generator[1]],
                                                                                                 [self.optim.optimizer, self.optim2.optimizer],
                                                                                                 opt_level=opt_level,
                                                                                                 keep_batchnorm_fp32=keep_batchnorm_fp32,
@@ -106,6 +99,10 @@ class XEAdversarialTrainer(XETrainer):
         report_loss, report_tgt_words = 0, 0
         report_classifier_loss, report_classifier_loss_rev = 0.0, 0.0
         report_src_words = 0
+        report_fwd_il_loss, report_bwd_il_loss, report_nmt_loss, report_dis_il_loss = 0, 0, 0, 0
+        report_vq_loss_codebook, report_vq_loss_commitment, report_diversity_loss = 0, 0, 0
+        report_norm_il_emb, report_norm_il_emb_var, report_norm_enc_out, report_minibatch_cnt = 0, 0, 0, 0
+
         start = time.time()
         n_samples = len(train_data)
 
@@ -138,9 +135,14 @@ class XEAdversarialTrainer(XETrainer):
 
             oom = False
             try:
+                if self.opt.il_warmup:
+                    if self.optim._step < self.optim.warmup_steps:
+                        self.loss_function.il_weight = (self.optim._step + 1) / self.optim.warmup_steps * self.opt.il_loss
+                    else:
+                        self.loss_function.il_weight = self.opt.il_loss
+
                 # Fetch ground truths for MT
                 targets = batch.get('target_output')
-
                 tgt_mask = targets.data.ne(onmt.constants.PAD)
 
                 outputs = self.model(batch, streaming=opt.streaming, target_mask=tgt_mask,
@@ -155,11 +157,34 @@ class XEAdversarialTrainer(XETrainer):
                 loss_data = loss_dict['data']
                 loss = loss_dict['loss'].div(denom)  # a little trick to avoid gradient overflow with fp16
 
+                if opt.il_sim_loss:
+                    fwd_il_loss_data = loss_dict["il_fwd_loss_data"]
+                    bwd_il_loss_data = loss_dict["il_bwd_loss_data"]
+                    dis_il_loss_data = loss_dict["il_dis_loss_data"]
+                    nmt_loss_data = loss_dict["nmt_loss_data"] if "nmt_loss_data" in loss_dict else loss_data
+
+                    vq_loss_codebook_data = loss_dict["vq_loss_codebook_data"]
+                    vq_loss_commitment_data = loss_dict["vq_loss_commitment_data"]
+
+                # Record norm of word LUT
+                with torch.no_grad():
+                    if hasattr(self.model, 'il_word_lut'):
+                        norm_il_emb_data = self.model.il_word_lut.weight.norm(p=2, dim=1).mean().data #loss_dict["norm_enc_out"]
+                        norm_il_emb_var_data = self.model.il_word_lut.weight.norm(p=2, dim=1).var().data
+                    else:
+                        norm_il_emb_data = self.model.encoder.word_lut.weight.norm(p=2, dim=1).mean().data
+                        norm_il_emb_var_data = self.model.encoder.word_lut.weight.norm(p=2, dim=1).var().data
+
+                    # Pre quantization enc out
+                    enc_out = outputs["context"]
+                    norm_enc_out_data = enc_out.view(-1, enc_out.shape[-1]).norm(p=2, dim=1).mean().data
+
                 optimizer = self.optim.optimizer
                 optimizer_classifier = self.optim2.optimizer
                 # use 2nd loss
                 alternate_training = (epoch >= opt.adversarial_classifier_start_from)
 
+                # Normal MT loss
                 if not alternate_training or not optimize_classifier:
                     # freeze classifier
                     self.model.generator[1].requires_grad_(False)
@@ -284,7 +309,7 @@ class XEAdversarialTrainer(XETrainer):
                 # elif i == n_samples - 1:  # update for the last minibatch
                 #     update_flag = True
 
-                if update_flag:
+                if update_flag:     # Update params
                     grad_denom = 1 / denom
                     if self.opt.normalize_gradient:
                         grad_denom = num_accumulated_words / denom
@@ -309,7 +334,9 @@ class XEAdversarialTrainer(XETrainer):
                     num_updates = self.optim._step
 
                     if opt.save_every > 0 and num_updates % opt.save_every == -1 % opt.save_every:
-                        valid_loss, _ = self.eval(self.valid_data, report_classifier=True, report_cm=True)
+                        valid_loss, _ = self.eval(self.valid_data,
+                                                  report_classifier=True,
+                                                  report_cm=True)
                         valid_ppl = math.exp(min(valid_loss, 100))
                         print('Validation perplexity: %g' % valid_ppl)
 
@@ -319,57 +346,101 @@ class XEAdversarialTrainer(XETrainer):
 
                     update_counter += 1
 
-                # TODO: how to make this less hand crafty?!
-                    if alternate_training and ((not optimize_classifier and update_counter >= 10) or \
-                        (optimize_classifier and update_counter >= 50)):
+                    # TODO: how to make this less hand crafty?!
+                    if alternate_training and \
+                            ((not optimize_classifier and update_counter >= 10) or (optimize_classifier and update_counter >= 50)):
                         update_counter = 0
-                        valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=True, report_cm=False)
-                        valid_ppl = math.exp(min(valid_loss, 100))
-                        print('============optimize_classifier <--', optimize_classifier)
-                        print('Validation perplexity: %g, adv loss: %6.6f\n' % (valid_ppl, valid_adv_loss))
+                        # valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=False, report_cm=False)
+                        # valid_ppl = math.exp(min(valid_loss, 100))
+                        # print('============optimize_classifier <--', optimize_classifier)
+                        # print('Validation perplexity: %g, adv loss: %6.6f\n' % (valid_ppl, valid_adv_loss))
                         # print('============optimize_classifier -->', optimize_classifier)
-                        print(self.optim.lr, self.optim2.lr)
+                        # print("LR1", self.optim.lr, "LR2", self.optim2.lr)
                         optimize_classifier = not optimize_classifier
 
                 num_words = tgt_size
-                report_loss += loss_data
+                report_loss += loss_dict["nmt_loss_data"] if "nmt_loss_data" in loss_dict else loss_data
                 report_classifier_loss += classifier_loss_data if alternate_training else 0
                 report_classifier_loss_rev += classifier_loss_data_rev if alternate_training else 0
                 report_tgt_words += num_words
                 report_src_words += src_size
-                total_loss += loss_data
+                total_loss += loss_dict["nmt_loss_data"] if "nmt_loss_data" in loss_dict else loss_data
                 total_words += num_words
                 total_tokens += batch.get('target_output').nelement()
                 total_non_pads += batch.get('target_output').ne(onmt.constants.PAD).sum().item()
                 optim = self.optim
                 batch_efficiency = total_non_pads / total_tokens
 
+                if opt.il_sim_loss:
+                    report_fwd_il_loss += fwd_il_loss_data
+                    report_bwd_il_loss += bwd_il_loss_data
+                    report_dis_il_loss += dis_il_loss_data
+                    report_nmt_loss += nmt_loss_data
+                    report_vq_loss_codebook += vq_loss_codebook_data
+                    report_vq_loss_commitment += vq_loss_commitment_data
+
+                report_norm_il_emb += norm_il_emb_data
+                report_norm_il_emb_var += norm_il_emb_var_data
+                report_norm_enc_out += norm_enc_out_data
+                report_minibatch_cnt += 1
+
                 if i == 0 or (i % opt.log_interval == -1 % opt.log_interval):
                     valid_loss, valid_adv_loss = self.eval(self.valid_data, report_classifier=False, report_cm=False)
                     valid_ppl = math.exp(min(valid_loss, 100))
                     print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
 
-                    print(("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; classifier loss: %6.2f ; classifier rev loss: %6.2f ; lr: %.7f ; num updates: %7d " +
-                           "%5.0f src tok/s; %5.0f tgt tok/s; %s elapsed") %
-                          (epoch, i + 1, len(data_iterator),
-                           math.exp(report_loss / report_tgt_words),
-                           report_classifier_loss / float(report_src_words),
-                           report_classifier_loss_rev / float(report_src_words),
-                           optim.getLearningRate(),
-                           optim._step,
-                           report_src_words / (time.time() - start),
-                           report_tgt_words / (time.time() - start),
-                           str(datetime.timedelta(seconds=int(time.time() - self.start_time)))))
+                    log_string = ("Epoch %2d, %5d/%5d; ; ppl: %6.2f ; " %
+                                  (epoch, i + 1, len(data_iterator),
+                                   math.exp(report_loss / report_tgt_words)))
+
+                    if opt.il_sim_loss:
+                        fwd_il_ppl = math.exp(report_fwd_il_loss / (1.0 * report_src_words))
+                        bwd_il_ppl = math.exp(report_bwd_il_loss / (1.0 * report_src_words))
+                        dis_il_ppl = math.exp(report_dis_il_loss / (1.0 * report_src_words))
+                        nmt_ppl = math.exp(report_nmt_loss / report_tgt_words)
+                        log_string += (" il_fwd_ppl: %6.2f ; " % fwd_il_ppl)
+                        log_string += (" il_bwd_ppl: %6.2f ; " % bwd_il_ppl)
+                        log_string += (" il_dis_pll: %6.2f %6.2f ; " % (dis_il_ppl, report_dis_il_loss))
+                        log_string += (" il_fwd_loss: %6.2f %6.2f %6.2f; " % (
+                            report_fwd_il_loss,
+                            report_src_words,
+                            (report_fwd_il_loss / (1.0 * report_src_words.item()))
+                        ))
+                        log_string += (" ce_loss (raw): %6.2f ; " % report_nmt_loss)
+                        log_string += (" vq_mse_codebook (raw): %6.2f ; " % report_vq_loss_codebook)
+                        log_string += (" vq_mse_codebook: %6.2f ; " % (report_vq_loss_codebook / report_src_words))
+                        log_string += (" vq_mse_commitment: %6.2f ; " % (report_vq_loss_commitment / report_src_words))
+                        log_string += (" diversity_loss: %6.2f ; " % (report_diversity_loss / report_minibatch_cnt))
+
+                    log_string += (" avg_norm_il_emb: %6.2f ; " % (report_norm_il_emb / report_minibatch_cnt))
+                    log_string += (" var_norm_il_emb: %6.2f ; " % (report_norm_il_emb_var / report_minibatch_cnt))
+                    log_string += (" avg_norm_enc_out: %6.2f ; " % (report_norm_enc_out / report_minibatch_cnt))
+
+                    log_string += ("lr: %.7f ; updates: %7d; " %
+                                   (self.optim.getLearningRate(),
+                                    self.optim._step))
+
+                    log_string += ("%5.0f src tok/s; %5.0f tgt tok/s; " %
+                                   (report_src_words / (time.time() - start),
+                                    report_tgt_words / (time.time() - start)))
+
+                    log_string += ("%s elapsed" %
+                                   str(datetime.timedelta(seconds=int(time.time() - self.start_time))))
+
+                    print(log_string)
 
                     report_loss, report_tgt_words = 0, 0
                     report_classifier_loss, report_classifier_loss_rev = 0.0, 0.0
                     report_src_words = 0
+                    report_aux_loss = 0.0
+                    report_fwd_il_loss, report_bwd_il_loss, report_nmt_loss, report_dis_il_loss = 0, 0, 0, 0
+                    report_vq_loss_codebook, report_vq_loss_commitment, report_diversity_loss = 0, 0, 0
+                    report_norm_il_emb, report_norm_il_emb_var, report_norm_enc_out, report_minibatch_cnt = 0, 0, 0, 0
                     start = time.time()
 
                 i = i + 1
 
         return total_loss / total_words
-
 
     def save(self, epoch, valid_ppl, itr=None):
         opt = self.opt
@@ -412,3 +483,92 @@ class XEAdversarialTrainer(XETrainer):
         if epoch - best_epoch >= opt.early_stop_if_no_change:
             print(" * Early stopping at epoch %s as best epoch was %s ." % (epoch, best_epoch))
             sys.exit(0)
+
+
+    def run(self, checkpoint=None):
+        # TODO: This is a big bunch of copied code from the superclass
+
+        opt = self.opt
+        model = self.model
+        # optim = self.optim
+
+        if checkpoint is not None:
+            self.model.load_state_dict(checkpoint['model'])
+            prec_opt = checkpoint['opt'] if 'opt' in checkpoint else None
+
+            if not opt.reset_optim:
+                print("* Loading optimizer states ... ")
+                self.optim.load_state_dict(checkpoint['optim'])
+                if prec_opt is not None and hasattr(prec_opt, "fp16_mixed"):
+                    # Only load amp information if the mode is the same
+                    # Maybe its better to change between optimization mode?
+                    if opt.fp16_mixed == prec_opt.fp16_mixed and opt.fp16 == prec_opt.fp16:
+                        if 'amp' in checkpoint:
+                            amp.load_state_dict(checkpoint['amp'])
+
+                # Only load the progress when we use the same optimizer
+                if 'itr' in checkpoint:
+                    itr_progress = checkpoint['itr']
+                else:
+                    itr_progress = None
+
+                resume = True
+                start_epoch = checkpoint['epoch'] if 'epoch' in checkpoint else 1
+                if start_epoch is None:
+                    start_epoch = 1
+
+            else:
+                itr_progress = None
+                resume = False
+                start_epoch = 1
+
+            del checkpoint['model']
+            del checkpoint['optim']
+            del checkpoint
+        else:
+            itr_progress = None
+            print('Initializing model parameters')
+            init_model_parameters(model, opt)
+            resume = False
+            start_epoch = 1
+
+        if opt.load_encoder_from:
+            self.load_encoder_weight(opt.load_encoder_from)
+
+        # if opt.load_decoder_from:
+        #     self.load_decoder_weight(opt.load_decoder_from)
+
+        report_classifier = opt.token_classifier is not None
+        report_confusion_matrix = opt.token_classifier == 0
+        # if we are on a GPU: warm up the memory allocator
+        if self.cuda:
+            self.warm_up()
+
+            valid_loss, valid_adv_loss = self.eval(self.valid_data,
+                                                   bidirectional_translation=self.opt.bidirectional_translation,
+                                                   report_classifier=report_classifier,
+                                                   report_cm=report_confusion_matrix)
+            valid_ppl = math.exp(min(valid_loss, 100))
+            print('Validation perplexity: %g, classifier loss: %6.6f' % (valid_ppl, valid_adv_loss))
+
+        self.start_time = time.time()
+
+        for epoch in range(opt.start_epoch, opt.start_epoch + opt.epochs):
+            print('')
+
+            #  (1) train for one epoch on the training set
+            train_loss = self.train_epoch(epoch, resume=resume, itr_progress=itr_progress)
+            train_ppl = math.exp(min(train_loss, 100))
+            print('Train perplexity: %g' % train_ppl)
+
+            #  (2) evaluate on the validation set
+            valid_loss, valid_adv_loss = self.eval(self.valid_data,
+                                                   bidirectional_translation=self.opt.bidirectional_translation,
+                                                   report_classifier=report_classifier,
+                                                   report_cm=report_confusion_matrix)
+            valid_ppl = math.exp(min(valid_loss, 100))
+            print('Validation perplexity: %g, adv loss: %6.6f' % (valid_ppl, valid_adv_loss))
+
+            self.save(epoch, valid_ppl)
+            itr_progress = None
+            resume = False
